@@ -16,6 +16,7 @@ typedef enum Relay_TerminalKey {
     RELAY_TERMINAL_KEY_NONE,
     RELAY_TERMINAL_KEY_UP,
     RELAY_TERMINAL_KEY_DOWN,
+    RELAY_TERMINAL_KEY_TAB,
     RELAY_TERMINAL_KEY_CONFIRM,
     RELAY_TERMINAL_KEY_ESCAPE
 } Relay_TerminalKey;
@@ -42,6 +43,8 @@ typedef struct Relay_TerminalEvent {
     uint32_t character;
     int mouse_x;
     int mouse_y;
+    bool panel_tab_clicked;
+    uint64_t selected_node_id;
     uint64_t dragged_node_id;
     int grid_delta_x;
     int grid_delta_y;
@@ -62,6 +65,7 @@ typedef struct Relay_Terminal {
     uint64_t dragged_node_id;
     uint64_t wiring_source_node_id;
     size_t wiring_source_port_index;
+    bool wiring_origin_is_output;
     int wiring_mouse_x;
     int wiring_mouse_y;
     int64_t grid_offset_x;

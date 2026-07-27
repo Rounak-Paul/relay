@@ -36,10 +36,13 @@ in [AGENTS.md](AGENTS.md).
 
 The game starts with a Coal Miner and 100 neutral currency. The Shop sells
 Clock modules. Use `j`/`k` or the arrow keys to choose an offer, then Enter to
-purchase and place it in the Relay workspace. Drag a Clock's right-side pulse
-port onto the Coal Miner's left-side clock port to wire them together. A Clock
-emits one pulse every configured gameplay ticks; use `[` and `]` while the
-newly created Clock is focused to choose 2, 4, 8, 16, 32, 64, or 128 ticks.
+purchase and place it in the Relay workspace. Drag either the Clock output row
+or the Coal Miner input row onto its compatible opposite port to wire them
+together. A Clock emits its `Clock` signal every configured gameplay ticks.
+Press Tab or click either panel tab to switch between Shop and Inspector. Click
+a node title to focus it and open its Inspector. Its Clocking Wizard
+shows the `Clock` signal and current period; use `[` and `]` to choose 2, 4,
+8, 16, 32, 64, or 128 ticks.
 Drag the Coal Miner's Coal output back to its Fuel input to make the initial
 bootstrap loop self-sustaining. The starter miner carries one coal of fuel,
 then consumes one coal for each 16-pulse mining cycle. Its progress row shows
@@ -53,9 +56,9 @@ Graph links are
 typed and replace the destination input's prior link, which is the same graph
 contract future script-authored modules will use. Connected ports are joined by
 cyan orthogonal wires with rounded turns and short port stubs, rendered behind
-the cards. A matching live wire previews its route while you drag from an
-output; forward links use the minimal centered path, while reverse links take a
-safe outside-card detour. All wires follow panning and node movement.
+the cards. A matching live wire previews its route while you drag from either
+port direction; forward links use the minimal centered path, while reverse
+links take a safe outside-card detour. All wires follow panning and node movement.
 
 Every purchased node becomes the viewport focus. Press `m` to toggle the Relay
 map view, which zooms out to compact node names; drag its empty space to pan at

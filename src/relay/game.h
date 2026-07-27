@@ -12,7 +12,8 @@ typedef uint64_t Relay_Currency;
 
 /** Tabs currently available in Relay's right-side control panel. */
 typedef enum Relay_GamePanelTab {
-    RELAY_GAME_PANEL_TAB_SHOP
+    RELAY_GAME_PANEL_TAB_SHOP,
+    RELAY_GAME_PANEL_TAB_INSPECTOR
 } Relay_GamePanelTab;
 
 /** Zoom level used by Relay's graph workspace. */
@@ -28,6 +29,7 @@ typedef enum Relay_GameInput {
     RELAY_GAME_INPUT_NEXT,
     RELAY_GAME_INPUT_CONFIRM,
     RELAY_GAME_INPUT_TOGGLE_MAP,
+    RELAY_GAME_INPUT_TOGGLE_PANEL_TAB,
     RELAY_GAME_INPUT_PREVIOUS_CLOCK_RATE,
     RELAY_GAME_INPUT_NEXT_CLOCK_RATE
 } Relay_GameInput;
@@ -69,6 +71,9 @@ Relay_GameActionResult relay_game_handle_input(Relay_Game *game,
 /** Move one node by a grid delta after validated workspace interaction. */
 bool relay_game_move_node(Relay_Game *game, Relay_NodeId id, int delta_x,
     int delta_y);
+
+/** Make an existing node the active target for workspace controls and inspection. */
+bool relay_game_focus_node(Relay_Game *game, Relay_NodeId id);
 
 /** Connect a typed source port to an input port in the root gameplay module. */
 bool relay_game_connect_nodes(Relay_Game *game, Relay_NodeId source_node_id,

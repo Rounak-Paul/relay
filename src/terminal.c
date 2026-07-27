@@ -8,8 +8,8 @@
 
 enum {
     RELAY_TERMINAL_MIN_GAME_WIDTH = 12,
-    RELAY_TERMINAL_MIN_PANEL_WIDTH = 18,
-    RELAY_TERMINAL_MAX_PANEL_WIDTH = 28,
+    RELAY_TERMINAL_MIN_PANEL_WIDTH = 30,
+    RELAY_TERMINAL_MAX_PANEL_WIDTH = 42,
     RELAY_TERMINAL_MIN_HEIGHT = 10
 };
 
@@ -239,6 +239,29 @@ static bool relay_terminal_output_anchor(const Relay_Game *game,
     return true;
 }
 
+/** Resolve an input port's terminal anchor for reverse-start live wiring. */
+static bool relay_terminal_input_anchor(const Relay_Game *game,
+    const Relay_Terminal *terminal, Relay_NodeId node_id, size_t port_index,
+    int *x, int *y)
+{
+    const Relay_Node *node;
+    Relay_NodeRenderCard card;
+
+    if (game == NULL || terminal == NULL || x == NULL || y == NULL) {
+        return false;
+    }
+    node = relay_node_world_find_const(&game->nodes, node_id);
+    card = relay_node_renderer_card(node);
+    if (node == NULL || card.definition == NULL ||
+        port_index >= card.definition->input_count) {
+        return false;
+    }
+    *x = 2 + (int)node->grid_x + (int)terminal->grid_offset_x;
+    *y = 3 + (int)node->grid_y + (int)terminal->grid_offset_y + 3 +
+        (int)port_index;
+    return true;
+}
+
 /** Calculate the divider position for Relay's playfield and side panel. */
 static bool relay_terminal_split(int width, int height, int *divider_x)
 {
@@ -248,7 +271,7 @@ static bool relay_terminal_split(int width, int height, int *divider_x)
     if (divider_x == NULL || height < RELAY_TERMINAL_MIN_HEIGHT) {
         return false;
     }
-    panel_width = width / 3;
+    panel_width = width * 2 / 5;
     if (panel_width < RELAY_TERMINAL_MIN_PANEL_WIDTH) {
         panel_width = RELAY_TERMINAL_MIN_PANEL_WIDTH;
     } else if (panel_width > RELAY_TERMINAL_MAX_PANEL_WIDTH) {
@@ -261,6 +284,16 @@ static bool relay_terminal_split(int width, int height, int *divider_x)
 
     *divider_x = game_width;
     return true;
+}
+
+/** Return whether a terminal coordinate targets the right-panel tab strip. */
+static bool relay_terminal_panel_tab_at(int width, int height, int mouse_x,
+    int mouse_y)
+{
+    int divider_x;
+
+    return relay_terminal_split(width, height, &divider_x) && mouse_y == 1 &&
+        mouse_x >= divider_x + 2 && mouse_x < width;
 }
 
 #if RELAY_PLATFORM_WINDOWS
@@ -410,13 +443,24 @@ static bool relay_terminal_draw_wires(HANDLE output, const Relay_Game *game,
         const int source_top = source == NULL ? 0 : 3 + (int)source->grid_y +
             (int)terminal->grid_offset_y;
 
-        if (source != NULL && relay_terminal_output_anchor(game, terminal,
+        if (source != NULL && terminal->wiring_origin_is_output &&
+            relay_terminal_output_anchor(game, terminal,
                 source->id, terminal->wiring_source_port_index, &source_x,
                 &source_y)) {
             relay_terminal_wire_path_create(source_x, source_y, source_top,
                 source_top + card.height - 1, terminal->wiring_mouse_x,
                 terminal->wiring_mouse_y, terminal->wiring_mouse_y,
                 terminal->wiring_mouse_y, &path);
+            if (!relay_terminal_draw_wire_path(output, &path, divider_x, height)) {
+                return false;
+            }
+        } else if (source != NULL && relay_terminal_input_anchor(game, terminal,
+                source->id, terminal->wiring_source_port_index, &source_x,
+                &source_y)) {
+            relay_terminal_wire_path_create(terminal->wiring_mouse_x,
+                terminal->wiring_mouse_y, terminal->wiring_mouse_y,
+                terminal->wiring_mouse_y, source_x, source_y, source_top,
+                source_top + card.height - 1, &path);
             if (!relay_terminal_draw_wire_path(output, &path, divider_x, height)) {
                 return false;
             }
@@ -508,6 +552,7 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
     int y;
     char line[64];
     size_t index;
+    const Relay_Node *focused;
 
     if (!relay_terminal_split(width, height, &divider_x)) {
         return relay_terminal_write_at(output, 0, 0,
@@ -523,7 +568,9 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
                 "\x1b[1;36m[ Relay ]  MAP\x1b[0m" :
                 "\x1b[1;36m[ Relay ]\x1b[0m") ||
         !relay_terminal_write_at(output, divider_x + 2, 1,
-            "\x1b[1;36m[ SHOP ]\x1b[0m")) {
+            game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
+                "\x1b[1;36m[ SHOP ]\x1b[0m  [ Inspect ]" :
+                "[ Shop ]  \x1b[1;36m[ INSPECT ]\x1b[0m")) {
         return false;
     }
     if (!relay_terminal_draw_grid(output, divider_x, height, terminal)) {
@@ -541,15 +588,68 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
     if (!relay_terminal_write_at(output, divider_x + 2, 4, line)) {
         return false;
     }
-    for (index = 0; index < relay_game_shop_offer_count() && 6 + (int)index < height - 2;
-        index++) {
-        const Relay_ShopOffer *offer = relay_game_shop_offer_at(index);
-        const Relay_NodeDefinition *definition = relay_game_shop_offer_definition(offer);
+    if (game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
+        for (index = 0; index < relay_game_shop_offer_count() &&
+            6 + (int)index < height - 2; index++) {
+            const Relay_ShopOffer *offer = relay_game_shop_offer_at(index);
+            const Relay_NodeDefinition *definition = relay_game_shop_offer_definition(offer);
 
-        (void)snprintf(line, sizeof(line), "%c %-7s %3llu", index == game->selected_offer ?
-            '>' : ' ', definition->display_name, (unsigned long long)offer->price);
-        if (!relay_terminal_write_at(output, divider_x + 2, 6 + (int)index, line)) {
-            return false;
+            (void)snprintf(line, sizeof(line), "%c %-16s %3llu", index == game->selected_offer ?
+                '>' : ' ', definition->display_name, (unsigned long long)offer->price);
+            if (!relay_terminal_write_at(output, divider_x + 2, 6 + (int)index, line)) {
+                return false;
+            }
+        }
+    } else {
+        focused = relay_node_world_find_const(&game->nodes, game->focused_node_id);
+        if (focused == NULL) {
+            if (!relay_terminal_write_at(output, divider_x + 2, 6,
+                    "No node selected.")) {
+                return false;
+            }
+        } else {
+            const Relay_NodeDefinition *definition = relay_node_definition_find(
+                focused->definition_id);
+
+            if (definition == NULL) {
+                return false;
+            }
+            (void)snprintf(line, sizeof(line), "%s", definition->display_name);
+            if (!relay_terminal_write_at(output, divider_x + 2, 6, line)) {
+                return false;
+            }
+            (void)snprintf(line, sizeof(line), "id: %llu", (unsigned long long)focused->id);
+            if (!relay_terminal_write_at(output, divider_x + 2, 7, line)) {
+                return false;
+            }
+            if (focused->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
+                if (!relay_terminal_write_at(output, divider_x + 2, 9,
+                        "Clocking Wizard") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 10,
+                        "signal: Clock")) {
+                    return false;
+                }
+                (void)snprintf(line, sizeof(line), "period: %lld ticks",
+                    (long long)focused->clock_period);
+                if (!relay_terminal_write_at(output, divider_x + 2, 11, line) ||
+                    !relay_terminal_write_at(output, divider_x + 2, 12,
+                        "rates: 2 4 8 16 32 64 128") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 13,
+                        "[ / ] change period")) {
+                    return false;
+                }
+            } else if (focused->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
+                (void)snprintf(line, sizeof(line), "fuel coal: %lld",
+                    (long long)focused->fuel_coal);
+                if (!relay_terminal_write_at(output, divider_x + 2, 9, line)) {
+                    return false;
+                }
+                (void)snprintf(line, sizeof(line), "progress: %lld / 16",
+                    (long long)focused->progress);
+                if (!relay_terminal_write_at(output, divider_x + 2, 10, line)) {
+                    return false;
+                }
+            }
         }
     }
     for (index = 0; index < game->nodes.count; index++) {
@@ -564,8 +664,9 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
         }
     }
     return relay_terminal_write_at(output, divider_x + 2, height - 3,
-        "drag output to input") && relay_terminal_write_at(output,
-            divider_x + 2, height - 2, "[ / ] clock rate");
+        "Tab: panel") && relay_terminal_write_at(output, divider_x + 2,
+            height - 2, game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
+                "j/k: select  Enter: buy" : "click a title to inspect");
 }
 
 bool relay_terminal_init(Relay_Terminal *terminal)
@@ -721,12 +822,14 @@ static Relay_TerminalPortHit relay_terminal_port_at(const Relay_Game *game,
         const int y = 3 + node->grid_y + terminal->grid_offset_y;
         const int row = mouse_y - (y + 3);
 
-        if (card.definition != NULL && row >= 0 && row < (int)card.definition->input_count &&
-            mouse_x == x) {
+        if (card.definition != NULL && row >= 0 &&
+            row < (int)card.definition->input_count && mouse_x >= x &&
+            mouse_x < x + card.width / 2) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, false};
         }
-        if (card.definition != NULL && row >= 0 && row < (int)card.definition->output_count &&
-            mouse_x == x + card.width - 1) {
+        if (card.definition != NULL && row >= 0 &&
+            row < (int)card.definition->output_count && mouse_x >=
+            x + card.width / 2 && mouse_x < x + card.width) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, true};
         }
     }
@@ -737,6 +840,7 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
     Relay_TerminalEvent *event)
 {
     INPUT_RECORD record;
+    CONSOLE_SCREEN_BUFFER_INFO information;
     DWORD count;
 
     if (terminal == NULL || game == NULL || event == NULL || !terminal->initialized) {
@@ -760,6 +864,8 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
             event->key = RELAY_TERMINAL_KEY_UP;
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_DOWN) {
             event->key = RELAY_TERMINAL_KEY_DOWN;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_TAB) {
+            event->key = RELAY_TERMINAL_KEY_TAB;
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) {
             event->key = RELAY_TERMINAL_KEY_CONFIRM;
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
@@ -773,14 +879,23 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
         event->mouse_x = mouse->dwMousePosition.X;
         event->mouse_y = mouse->dwMousePosition.Y;
         if (left_down && !terminal->dragging_grid && !terminal->dragging_node &&
-            !terminal->wiring) {
+            !terminal->wiring && GetConsoleScreenBufferInfo(terminal->output,
+                &information) && relay_terminal_panel_tab_at(
+                information.srWindow.Right - information.srWindow.Left + 1,
+                information.srWindow.Bottom - information.srWindow.Top + 1,
+                event->mouse_x, event->mouse_y)) {
+            event->panel_tab_clicked = true;
+            return true;
+        } else if (left_down && !terminal->dragging_grid &&
+            !terminal->dragging_node && !terminal->wiring) {
             const Relay_TerminalPortHit hit = relay_terminal_port_at(game, terminal,
                 event->mouse_x, event->mouse_y);
 
-            if (hit.node_id != 0 && hit.is_output) {
+            if (hit.node_id != 0) {
                 terminal->wiring = true;
                 terminal->wiring_source_node_id = hit.node_id;
                 terminal->wiring_source_port_index = hit.port_index;
+                terminal->wiring_origin_is_output = hit.is_output;
                 terminal->wiring_mouse_x = event->mouse_x;
                 terminal->wiring_mouse_y = event->mouse_y;
                 return true;
@@ -788,6 +903,7 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
             terminal->dragged_node_id = relay_terminal_node_at(game, terminal,
                 event->mouse_x, event->mouse_y);
             terminal->dragging_node = terminal->dragged_node_id != 0;
+            event->selected_node_id = terminal->dragged_node_id;
             terminal->dragging_grid = !terminal->dragging_node;
             terminal->drag_last_x = event->mouse_x;
             terminal->drag_last_y = event->mouse_y;
@@ -818,11 +934,19 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
                 const Relay_TerminalPortHit hit = relay_terminal_port_at(game, terminal,
                     event->mouse_x, event->mouse_y);
 
-                if (hit.node_id != 0 && !hit.is_output) {
-                    event->connection_source_node_id = terminal->wiring_source_node_id;
-                    event->connection_source_port_index = terminal->wiring_source_port_index;
-                    event->connection_destination_node_id = hit.node_id;
-                    event->connection_destination_port_index = hit.port_index;
+                if (hit.node_id != 0 && hit.is_output !=
+                    terminal->wiring_origin_is_output) {
+                    if (terminal->wiring_origin_is_output) {
+                        event->connection_source_node_id = terminal->wiring_source_node_id;
+                        event->connection_source_port_index = terminal->wiring_source_port_index;
+                        event->connection_destination_node_id = hit.node_id;
+                        event->connection_destination_port_index = hit.port_index;
+                    } else {
+                        event->connection_source_node_id = hit.node_id;
+                        event->connection_source_port_index = hit.port_index;
+                        event->connection_destination_node_id = terminal->wiring_source_node_id;
+                        event->connection_destination_port_index = terminal->wiring_source_port_index;
+                    }
                 }
             }
             terminal->dragging_grid = false;
@@ -980,14 +1104,25 @@ static void relay_terminal_draw_shared_wires(const Relay_Game *game,
         int source_y;
         int source_top;
 
-        if (source != NULL && relay_terminal_output_anchor(game, terminal,
+        if (source != NULL) {
+            source_top = 3 + (int)source->grid_y + (int)terminal->grid_offset_y;
+        }
+        if (source != NULL && terminal->wiring_origin_is_output &&
+            relay_terminal_output_anchor(game, terminal,
                 source->id, terminal->wiring_source_port_index, &source_x,
                 &source_y)) {
-            source_top = 3 + (int)source->grid_y + (int)terminal->grid_offset_y;
             relay_terminal_wire_path_create(source_x, source_y, source_top,
                 source_top + card.height - 1, terminal->wiring_mouse_x,
                 terminal->wiring_mouse_y, terminal->wiring_mouse_y,
                 terminal->wiring_mouse_y, &path);
+            relay_terminal_draw_wire_path(&path, divider_x, height);
+        } else if (source != NULL && relay_terminal_input_anchor(game, terminal,
+                source->id, terminal->wiring_source_port_index, &source_x,
+                &source_y)) {
+            relay_terminal_wire_path_create(terminal->wiring_mouse_x,
+                terminal->wiring_mouse_y, terminal->wiring_mouse_y,
+                terminal->wiring_mouse_y, source_x, source_y, source_top,
+                source_top + card.height - 1, &path);
             relay_terminal_draw_wire_path(&path, divider_x, height);
         }
     }
@@ -1200,6 +1335,7 @@ static void relay_terminal_draw_split(int width, int height,
     int divider_x;
     int y;
     size_t index;
+    const Relay_Node *focused;
 
     if (!relay_terminal_split(width, height, &divider_x)) {
         relay_terminal_draw_text(0, 0, TB_RED | TB_BOLD,
@@ -1216,20 +1352,60 @@ static void relay_terminal_draw_split(int width, int height,
     if (game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH) {
         relay_terminal_draw_wires(game, terminal, divider_x, height);
     }
-    relay_terminal_draw_text(divider_x + 2, 1, TB_CYAN | TB_BOLD, "[ SHOP ]");
+    relay_terminal_draw_text(divider_x + 2, 1, TB_CYAN | TB_BOLD,
+        game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
+            "[ SHOP ]  [ Inspect ]" : "[ Shop ]  [ INSPECT ]");
     (void)tb_printf(divider_x + 2, 3, TB_YELLOW | TB_BOLD, TB_DEFAULT,
         "◈ %llu", (unsigned long long)game->currency);
     (void)tb_printf(divider_x + 2, 4, TB_WHITE, TB_DEFAULT, "wires: %zu",
         game->nodes.connection_count);
-    for (index = 0; index < relay_game_shop_offer_count() &&
-        6 + (int)index < height - 2; index++) {
-        const Relay_ShopOffer *offer = relay_game_shop_offer_at(index);
-        const Relay_NodeDefinition *definition = relay_game_shop_offer_definition(offer);
+    if (game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
+        for (index = 0; index < relay_game_shop_offer_count() &&
+            6 + (int)index < height - 2; index++) {
+            const Relay_ShopOffer *offer = relay_game_shop_offer_at(index);
+            const Relay_NodeDefinition *definition = relay_game_shop_offer_definition(offer);
 
-        (void)tb_printf(divider_x + 2, 6 + (int)index,
-            index == game->selected_offer ? TB_GREEN | TB_BOLD : TB_WHITE,
-            TB_DEFAULT, "%c %s %llu", index == game->selected_offer ? '>' : ' ',
-            definition->display_name, (unsigned long long)offer->price);
+            (void)tb_printf(divider_x + 2, 6 + (int)index,
+                index == game->selected_offer ? TB_GREEN | TB_BOLD : TB_WHITE,
+                TB_DEFAULT, "%c %s %llu", index == game->selected_offer ? '>' : ' ',
+                definition->display_name, (unsigned long long)offer->price);
+        }
+    } else {
+        focused = relay_node_world_find_const(&game->nodes, game->focused_node_id);
+        if (focused == NULL) {
+            relay_terminal_draw_text(divider_x + 2, 6, TB_WHITE,
+                "No node selected.");
+        } else {
+            const Relay_NodeDefinition *definition = relay_node_definition_find(
+                focused->definition_id);
+
+            if (definition == NULL) {
+                relay_terminal_draw_text(divider_x + 2, 6, TB_RED,
+                    "Node definition unavailable.");
+                return;
+            }
+            (void)tb_printf(divider_x + 2, 6, TB_WHITE | TB_BOLD, TB_DEFAULT,
+                "%s", definition->display_name);
+            (void)tb_printf(divider_x + 2, 7, TB_WHITE, TB_DEFAULT, "id: %llu",
+                (unsigned long long)focused->id);
+            if (focused->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
+                relay_terminal_draw_text(divider_x + 2, 9, TB_YELLOW | TB_BOLD,
+                    "Clocking Wizard");
+                relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,
+                    "signal: Clock");
+                (void)tb_printf(divider_x + 2, 11, TB_WHITE, TB_DEFAULT,
+                    "period: %lld ticks", (long long)focused->clock_period);
+                relay_terminal_draw_text(divider_x + 2, 12, TB_WHITE,
+                    "rates: 2 4 8 16 32 64 128");
+                relay_terminal_draw_text(divider_x + 2, 13, TB_YELLOW,
+                    "[ / ] change period");
+            } else if (focused->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
+                (void)tb_printf(divider_x + 2, 9, TB_WHITE, TB_DEFAULT,
+                    "fuel coal: %lld", (long long)focused->fuel_coal);
+                (void)tb_printf(divider_x + 2, 10, TB_WHITE, TB_DEFAULT,
+                    "progress: %lld / 16", (long long)focused->progress);
+            }
+        }
     }
     for (index = 0; index < game->nodes.count; index++) {
         const Relay_Node *node = &game->nodes.nodes[index];
@@ -1240,9 +1416,10 @@ static void relay_terminal_draw_split(int width, int height,
         }
     }
     relay_terminal_draw_text(divider_x + 2, height - 3, TB_YELLOW,
-        "drag output to input");
+        "Tab: panel");
     relay_terminal_draw_text(divider_x + 2, height - 2, TB_YELLOW,
-        "[ / ] clock rate");
+        game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
+            "j/k: select  Enter: buy" : "click a title to inspect");
 }
 
 /** Draw the centered exit-confirmation dialog above the current workspace. */
@@ -1366,12 +1543,14 @@ static Relay_TerminalPortHit relay_terminal_port_at(const Relay_Game *game,
         const int y = 3 + node->grid_y + terminal->grid_offset_y;
         const int row = mouse_y - (y + 3);
 
-        if (card.definition != NULL && row >= 0 && row < (int)card.definition->input_count &&
-            mouse_x == x) {
+        if (card.definition != NULL && row >= 0 &&
+            row < (int)card.definition->input_count && mouse_x >= x &&
+            mouse_x < x + card.width / 2) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, false};
         }
-        if (card.definition != NULL && row >= 0 && row < (int)card.definition->output_count &&
-            mouse_x == x + card.width - 1) {
+        if (card.definition != NULL && row >= 0 &&
+            row < (int)card.definition->output_count && mouse_x >=
+            x + card.width / 2 && mouse_x < x + card.width) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, true};
         }
     }
@@ -1411,6 +1590,8 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
             event->key = RELAY_TERMINAL_KEY_UP;
         } else if (termbox_event.key == TB_KEY_ARROW_DOWN) {
             event->key = RELAY_TERMINAL_KEY_DOWN;
+        } else if (termbox_event.key == TB_KEY_TAB) {
+            event->key = RELAY_TERMINAL_KEY_TAB;
         } else if (termbox_event.key == TB_KEY_ENTER) {
             event->key = RELAY_TERMINAL_KEY_CONFIRM;
         } else if (termbox_event.key == TB_KEY_ESC) {
@@ -1421,14 +1602,22 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
         event->mouse_x = termbox_event.x;
         event->mouse_y = termbox_event.y;
         if (termbox_event.key == TB_KEY_MOUSE_LEFT && !terminal->dragging_grid &&
-            !terminal->dragging_node && !terminal->wiring) {
+            !terminal->dragging_node && !terminal->wiring &&
+            relay_terminal_panel_tab_at(tb_width(), tb_height(), event->mouse_x,
+                event->mouse_y)) {
+            event->panel_tab_clicked = true;
+            return true;
+        } else if (termbox_event.key == TB_KEY_MOUSE_LEFT &&
+            !terminal->dragging_grid && !terminal->dragging_node &&
+            !terminal->wiring) {
             const Relay_TerminalPortHit hit = relay_terminal_port_at(game, terminal,
                 event->mouse_x, event->mouse_y);
 
-            if (hit.node_id != 0 && hit.is_output) {
+            if (hit.node_id != 0) {
                 terminal->wiring = true;
                 terminal->wiring_source_node_id = hit.node_id;
                 terminal->wiring_source_port_index = hit.port_index;
+                terminal->wiring_origin_is_output = hit.is_output;
                 terminal->wiring_mouse_x = event->mouse_x;
                 terminal->wiring_mouse_y = event->mouse_y;
                 return true;
@@ -1436,6 +1625,7 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
             terminal->dragged_node_id = relay_terminal_node_at(game, terminal,
                 event->mouse_x, event->mouse_y);
             terminal->dragging_node = terminal->dragged_node_id != 0;
+            event->selected_node_id = terminal->dragged_node_id;
             terminal->dragging_grid = !terminal->dragging_node;
             terminal->drag_last_x = event->mouse_x;
             terminal->drag_last_y = event->mouse_y;
@@ -1466,11 +1656,19 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
                 const Relay_TerminalPortHit hit = relay_terminal_port_at(game, terminal,
                     event->mouse_x, event->mouse_y);
 
-                if (hit.node_id != 0 && !hit.is_output) {
-                    event->connection_source_node_id = terminal->wiring_source_node_id;
-                    event->connection_source_port_index = terminal->wiring_source_port_index;
-                    event->connection_destination_node_id = hit.node_id;
-                    event->connection_destination_port_index = hit.port_index;
+                if (hit.node_id != 0 && hit.is_output !=
+                    terminal->wiring_origin_is_output) {
+                    if (terminal->wiring_origin_is_output) {
+                        event->connection_source_node_id = terminal->wiring_source_node_id;
+                        event->connection_source_port_index = terminal->wiring_source_port_index;
+                        event->connection_destination_node_id = hit.node_id;
+                        event->connection_destination_port_index = hit.port_index;
+                    } else {
+                        event->connection_source_node_id = hit.node_id;
+                        event->connection_source_port_index = hit.port_index;
+                        event->connection_destination_node_id = terminal->wiring_source_node_id;
+                        event->connection_destination_port_index = terminal->wiring_source_port_index;
+                    }
                 }
             }
             terminal->dragging_grid = false;

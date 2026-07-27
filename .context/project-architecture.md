@@ -65,7 +65,7 @@ must use stable node IDs, port indexes, and property APIs rather than terminal
 coordinates or mutable storage.
 
 The initial graph starts with one Coal Miner. The Shop sells Clock modules. A
-Clock emits a pulse at one of the valid periods (2 through 128 fixed ticks),
+Clock emits its `Clock` signal at one of the valid periods (2 through 128 fixed ticks),
 and the Coal Miner consumes one Coal fuel plus 16 connected pulses to produce
 one Coal. The initial miner has one bootstrap fuel item; players can feed its
 Coal output back to its Fuel input through a permitted self-connection. Each
@@ -92,15 +92,27 @@ for graph interactions.
 
 Graph connections render as clipped orthogonal terminal wires behind node cards,
 with rounded turns and short horizontal stubs outside edge-mounted port anchors.
-A live preview follows the pointer while an output is being wired. Their port
-anchors are resolved from immutable port schemas plus the current viewport, so
-panning and dragging never mutate a connection simply to redraw it.
+A live preview follows the pointer while either port direction is being wired.
+Their port anchors are resolved from immutable port schemas plus the current
+viewport, so panning and dragging never mutate a connection simply to redraw it.
 Forward links use the minimal two-turn centered route; only reverse-direction
 links use an outside-card detour to preserve output-right and input-left flow.
+Mouse hit testing uses the full left half of an input row and the full right
+half of an output row, rather than a single connector glyph. A wire may begin
+from either side; terminal input normalizes that interaction to one output-to-
+input graph connection before the game validates it.
 
 `Relay_Game.workspace_mode` owns the graph/map workspace state and
-`focused_node_id` records the last node created by a successful purchase. The
-terminal centers that node after creation. `m` toggles the compact map renderer;
+`focused_node_id` records the active node for inspection as well as the last node
+created by a successful purchase. The terminal centers newly created nodes after
+creation; clicking a card title changes focus through `relay_game_focus_node`
+and activates the Inspector.
+`Relay_Game.active_tab` owns the Shop/Inspector choice. Tab switches the wider
+right-side control panel between those views; clicking its tab strip toggles the
+same state. The Inspector reads the immutable
+definition and script-visible node properties; a focused Clock presents its
+Clocking Wizard configuration and valid period set without a parallel UI-only
+configuration model. `m` toggles the compact map renderer;
 Escape is a universal Back request, returning map view to graph view before the
 application opens its centered exit-confirmation overlay. Only Enter confirms
 that overlay; `q` is never an exit shortcut.
@@ -121,6 +133,6 @@ directly into the executable. Its isolated warning exception prevents an
 upstream unused static helper from weakening application diagnostics. Upstream
 Termbox2 is POSIX-only, so Windows uses its native Console API and
 virtual-terminal output. The renderer has one responsive split: a large left
-playfield and a right control panel. It keeps a divider and panel headers
-visible whenever the terminal meets the minimum 31-column by 10-row layout;
+playfield and a wider right control panel. It keeps a divider and panel headers
+visible whenever the terminal meets the minimum 43-column by 10-row layout;
 smaller terminals show a concise resize message instead.

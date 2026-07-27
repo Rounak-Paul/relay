@@ -149,14 +149,21 @@ Relay_GameActionResult relay_game_handle_input(Relay_Game *game,
     if (game == NULL || offer_count == 0) {
         return RELAY_GAME_ACTION_NONE;
     }
-    if (input == RELAY_GAME_INPUT_PREVIOUS) {
+    if (input == RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) {
+        game->active_tab = game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
+            RELAY_GAME_PANEL_TAB_INSPECTOR : RELAY_GAME_PANEL_TAB_SHOP;
+        game->last_action = RELAY_GAME_ACTION_NONE;
+    } else if (input == RELAY_GAME_INPUT_PREVIOUS &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
         game->selected_offer = game->selected_offer == 0 ? offer_count - 1 :
             game->selected_offer - 1;
         game->last_action = RELAY_GAME_ACTION_NONE;
-    } else if (input == RELAY_GAME_INPUT_NEXT) {
+    } else if (input == RELAY_GAME_INPUT_NEXT &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
         game->selected_offer = (game->selected_offer + 1) % offer_count;
         game->last_action = RELAY_GAME_ACTION_NONE;
-    } else if (input == RELAY_GAME_INPUT_CONFIRM) {
+    } else if (input == RELAY_GAME_INPUT_CONFIRM &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
         game->last_action = relay_game_purchase_selected(game);
     } else if (input == RELAY_GAME_INPUT_TOGGLE_MAP) {
         game->workspace_mode = game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH ?
@@ -209,6 +216,16 @@ bool relay_game_move_node(Relay_Game *game, Relay_NodeId id, int delta_x,
     return node != NULL && relay_node_world_move(&game->nodes, id,
         relay_game_add_delta(node->grid_x, delta_x),
         relay_game_add_delta(node->grid_y, delta_y));
+}
+
+bool relay_game_focus_node(Relay_Game *game, Relay_NodeId id)
+{
+    if (game == NULL || relay_node_world_find(&game->nodes, id) == NULL) {
+        return false;
+    }
+    game->focused_node_id = id;
+    game->active_tab = RELAY_GAME_PANEL_TAB_INSPECTOR;
+    return true;
 }
 
 bool relay_game_connect_nodes(Relay_Game *game, Relay_NodeId source_node_id,

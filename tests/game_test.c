@@ -1,6 +1,8 @@
 #include "relay/game.h"
 #include "relay/node_renderer.h"
 
+#include <string.h>
+
 /** Verify clock-driven coal production, typed wires, and script properties. */
 int relay_game_test(void)
 {
@@ -10,10 +12,14 @@ int relay_game_test(void)
     Relay_NodeValue value;
     Relay_NodeValueType value_type;
     Relay_NodeRenderCard card;
+    const Relay_NodeDefinition *clock_definition;
     size_t index;
 
+    clock_definition = relay_node_definition_find(RELAY_NODE_DEFINITION_CLOCK);
     if (!relay_game_init(&game) || game.currency != 100 || game.nodes.count != 1 ||
-        relay_node_definition_find_key("process.coal_miner") == NULL) {
+        relay_node_definition_find_key("process.coal_miner") == NULL ||
+        clock_definition == NULL || clock_definition->output_count != 1 ||
+        strcmp(clock_definition->outputs[0].key, "clock") != 0) {
         relay_game_shutdown(&game);
         return 1;
     }
@@ -60,6 +66,16 @@ int relay_game_test(void)
     if (relay_game_handle_input(&game, RELAY_GAME_INPUT_NEXT_CLOCK_RATE) !=
             RELAY_GAME_ACTION_NONE || relay_node_world_find(&game.nodes,
                 game.focused_node_id)->clock_period != 4 ||
+        relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) !=
+            RELAY_GAME_ACTION_NONE || game.active_tab !=
+                RELAY_GAME_PANEL_TAB_INSPECTOR ||
+        relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) !=
+            RELAY_GAME_ACTION_NONE || game.active_tab != RELAY_GAME_PANEL_TAB_SHOP ||
+        !relay_game_focus_node(&game,
+                    miner->id) || game.focused_node_id != miner->id ||
+        game.active_tab != RELAY_GAME_PANEL_TAB_INSPECTOR ||
+        relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) !=
+            RELAY_GAME_ACTION_NONE || game.active_tab != RELAY_GAME_PANEL_TAB_SHOP ||
         relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_MAP) !=
             RELAY_GAME_ACTION_NONE || !relay_game_back(&game) ||
         !relay_game_move_node(&game, miner->id, -9, -7) || miner->grid_x != -9 ||

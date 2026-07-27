@@ -41,6 +41,9 @@ static Relay_GameInput relay_app_game_input(const Relay_TerminalEvent *event)
     if (event->key == RELAY_TERMINAL_KEY_CONFIRM) {
         return RELAY_GAME_INPUT_CONFIRM;
     }
+    if (event->key == RELAY_TERMINAL_KEY_TAB) {
+        return RELAY_GAME_INPUT_TOGGLE_PANEL_TAB;
+    }
     if (event->character == 'm' || event->character == 'M') {
         return RELAY_GAME_INPUT_TOGGLE_MAP;
     }
@@ -226,6 +229,15 @@ int relay_app_run(Relay_App *app)
                 return 1;
             }
         } else if (event.type == RELAY_TERMINAL_EVENT_MOUSE) {
+            if (event.panel_tab_clicked) {
+                (void)relay_game_handle_input(&app->game,
+                    RELAY_GAME_INPUT_TOGGLE_PANEL_TAB);
+            }
+            if (event.selected_node_id != 0 &&
+                !relay_game_focus_node(&app->game, event.selected_node_id)) {
+                relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
+                    "Node selection was rejected.");
+            }
             if (event.connection_source_node_id != 0 &&
                 !relay_game_connect_nodes(&app->game,
                     event.connection_source_node_id,

@@ -22,7 +22,7 @@ static const Relay_NodePropertyDefinition relay_coal_miner_properties[] = {
 
 /** Ports for the player-controlled infinite clock resource. */
 static const Relay_NodePortDefinition relay_clock_outputs[] = {
-    {"pulse", "Pulse", RELAY_NODE_VALUE_INTEGER}
+    {"clock", "Clock", RELAY_NODE_VALUE_INTEGER}
 };
 
 /** Ports for a coal miner that consumes clock pulses. */
@@ -38,7 +38,7 @@ static const Relay_NodePortDefinition relay_coal_miner_outputs[] = {
 /** Immutable built-in module catalog with script-stable identifiers and keys. */
 static const Relay_NodeDefinition relay_node_definitions[] = {
     {RELAY_NODE_DEFINITION_CLOCK, "source.clock", "Clock", "◷",
-        "An infinite, configurable pulse source.", RELAY_NODE_CATEGORY_SOURCE,
+        "An infinite, configurable clock source.", RELAY_NODE_CATEGORY_SOURCE,
         NULL, 0, relay_clock_outputs, sizeof(relay_clock_outputs) /
             sizeof(relay_clock_outputs[0]), relay_clock_properties,
         sizeof(relay_clock_properties) / sizeof(relay_clock_properties[0])},
