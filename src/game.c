@@ -1,5 +1,8 @@
 #include "relay/game.h"
 
+#include <stdio.h>
+#include <string.h>
+
 enum {
     RELAY_GAME_STARTING_CURRENCY = 100,
     RELAY_GAME_CLOCK_PRICE = 30,
@@ -11,6 +14,18 @@ enum {
 static const Relay_ShopOffer relay_shop_offers[] = {
     {RELAY_NODE_DEFINITION_CLOCK, RELAY_GAME_CLOCK_PRICE}
 };
+
+/** Store focus in the active workspace and its shared renderer-facing field. */
+static void relay_game_set_focused_node(Relay_Game *game, Relay_NodeId node_id)
+{
+    game->focused_node_id = node_id;
+    if (game->active_workspace == 0) {
+        game->root_focused_node_id = node_id;
+    } else if (game->active_workspace <= game->blueprints.count) {
+        game->blueprints.blueprints[
+            game->active_workspace - 1].focused_node_id = node_id;
+    }
+}
 
 /** Return the adjacent editable clock period, wrapping through valid rates. */
 static int64_t relay_game_next_clock_period(int64_t period, int direction)
@@ -31,9 +46,10 @@ static int64_t relay_game_next_clock_period(int64_t period, int direction)
 static Relay_NodeId relay_game_create_node(Relay_Game *game,
     Relay_NodeDefinitionId definition_id)
 {
-    const size_t index = game->nodes.count;
+    Relay_NodeWorld *world = relay_game_active_world(game);
+    const size_t index = world == NULL ? 0 : world->count;
 
-    return relay_node_world_create(&game->nodes, definition_id,
+    return relay_node_world_create(world, definition_id,
         (int64_t)(index + 1) * RELAY_GAME_NODE_SPACING_X, 0);
 }
 
@@ -41,6 +57,11 @@ static Relay_NodeId relay_game_create_node(Relay_Game *game,
 static Relay_GameActionResult relay_game_purchase_selected(Relay_Game *game)
 {
     const Relay_ShopOffer *offer = relay_game_shop_offer_at(game->selected_offer);
+    Relay_NodeWorld *world;
+    Relay_Blueprint *active_blueprint;
+    size_t old_count;
+    Relay_NodeId old_next_id;
+    Relay_NodeId node_id;
 
     if (offer == NULL) {
         return RELAY_GAME_ACTION_CREATION_FAILED;
@@ -48,10 +69,21 @@ static Relay_GameActionResult relay_game_purchase_selected(Relay_Game *game)
     if (game->currency < offer->price) {
         return RELAY_GAME_ACTION_INSUFFICIENT_CURRENCY;
     }
-    game->focused_node_id = relay_game_create_node(game, offer->definition_id);
-    if (game->focused_node_id == 0) {
+    world = relay_game_active_world(game);
+    active_blueprint = relay_game_active_blueprint(game);
+    old_count = world->count;
+    old_next_id = world->next_id;
+    node_id = relay_game_create_node(game, offer->definition_id);
+    if (node_id == 0) {
         return RELAY_GAME_ACTION_CREATION_FAILED;
     }
+    if (active_blueprint != NULL &&
+        !relay_blueprint_rebuild_plan(&game->blueprints, active_blueprint)) {
+        world->count = old_count;
+        world->next_id = old_next_id;
+        return RELAY_GAME_ACTION_CREATION_FAILED;
+    }
+    relay_game_set_focused_node(game, node_id);
     game->currency -= offer->price;
     return RELAY_GAME_ACTION_PURCHASED;
 }
@@ -59,83 +91,271 @@ static Relay_GameActionResult relay_game_purchase_selected(Relay_Game *game)
 /** Update one clock output before consumers read this fixed gameplay tick. */
 static void relay_game_step_clock(Relay_Node *node)
 {
-    node->output_value = 0;
+    node->output_values[0] = 0;
     if (!node->enabled) {
         return;
     }
     node->clock_phase++;
     if (node->clock_phase >= node->clock_period) {
         node->clock_phase = 0;
-        node->output_value = 1;
+        node->output_values[0] = 1;
         node->produced++;
     }
 }
 
 /** Return a connected source value for a destination input in this tick. */
-static int64_t relay_game_input_value(const Relay_Game *game,
-    const Relay_Node *destination, size_t destination_port_index)
+static int64_t relay_game_input_value_depth(const Relay_Game *game,
+    const Relay_NodeWorld *world, const Relay_Node *destination,
+    size_t destination_port_index, size_t depth)
 {
     const Relay_NodeConnection *connection = relay_node_world_connection_to(
-        &game->nodes, destination->id, destination_port_index);
+        world, destination->id, destination_port_index);
     const Relay_Node *source;
+    size_t index;
 
-    if (connection == NULL) {
+    (void)game;
+    if (depth > world->count + 1) {
         return 0;
     }
-    source = relay_node_world_find_const(&game->nodes,
-        connection->source_node_id);
-    if (source == NULL) {
-        return 0;
-    }
-    return source == destination ? source->previous_output_value :
-        source->output_value;
-}
-
-/** Update a coal miner from clock pulses and expose each completed coal output. */
-static void relay_game_step_coal_miner(Relay_Game *game, Relay_Node *node)
-{
-    const int64_t fuel_input = relay_game_input_value(game, node, 1);
-
-    node->output_value = 0;
-    if (fuel_input > 0) {
-        node->fuel_coal += fuel_input;
-    }
-    if (!node->enabled || relay_game_input_value(game, node, 0) <= 0) {
-        return;
-    }
-    if (!node->processing) {
-        if (node->fuel_coal <= 0) {
-            return;
+    if (connection != NULL) {
+        source = relay_node_world_find_const(world, connection->source_node_id);
+        if (source == NULL) {
+            return 0;
         }
-        node->fuel_coal--;
-        node->processing = true;
+        return source->previous_output_values[
+            connection->source_port_index];
     }
-    node->progress++;
-    if (node->progress >= RELAY_GAME_COAL_REQUIRED_PULSES) {
-        node->progress = 0;
-        node->produced++;
-        node->output_value = 1;
-        node->processing = false;
+    for (index = 0; index < world->module_input_binding_count; index++) {
+        const Relay_NodeModuleInputBinding *binding =
+            &world->module_input_bindings[index];
+
+        if (binding->destination_node_id == destination->id &&
+            binding->destination_port_index == destination_port_index) {
+            const Relay_Node *module = relay_node_world_find_const(world,
+                binding->module_node_id);
+
+            return module == NULL ? 0 : relay_game_input_value_depth(game,
+                world, module, binding->module_port_index, depth + 1);
+        }
     }
+    return 0;
 }
 
-bool relay_game_init(Relay_Game *game)
+/** Return one connected or module-routed input value in this tick. */
+static int64_t relay_game_input_value(const Relay_Game *game,
+    const Relay_NodeWorld *world, const Relay_Node *destination,
+    size_t destination_port_index)
+{
+    return relay_game_input_value_depth(game, world, destination,
+        destination_port_index, 0);
+}
+
+bool relay_game_init(Relay_Game *game, Relay_ScriptRuntime *script_runtime)
 {
     Relay_NodeId coal_miner_id;
 
-    if (game == NULL || !relay_node_world_init(&game->nodes)) {
+    if (game == NULL || script_runtime == NULL) {
+        return false;
+    }
+    if (!relay_node_world_init(&game->nodes)) {
+        return false;
+    }
+    if (!relay_blueprint_library_init(&game->blueprints, script_runtime)) {
+        relay_node_world_shutdown(&game->nodes);
         return false;
     }
     coal_miner_id = relay_node_world_create(&game->nodes,
         RELAY_NODE_DEFINITION_COAL_MINER, 0, 0);
     if (coal_miner_id == 0) {
         relay_node_world_shutdown(&game->nodes);
+        relay_blueprint_library_shutdown(&game->blueprints);
         return false;
     }
     game->currency = RELAY_GAME_STARTING_CURRENCY;
+    game->script_runtime = script_runtime;
     game->active_tab = RELAY_GAME_PANEL_TAB_SHOP;
     game->workspace_mode = RELAY_GAME_WORKSPACE_GRAPH;
-    game->focused_node_id = coal_miner_id;
+    relay_game_set_focused_node(game, coal_miner_id);
+    return true;
+}
+
+Relay_NodeWorld *relay_game_active_world(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_active_blueprint(game);
+
+    return game == NULL ? NULL :
+        (blueprint == NULL ? &game->nodes : &blueprint->scene);
+}
+
+const Relay_NodeWorld *relay_game_active_world_const(const Relay_Game *game)
+{
+    if (game == NULL || game->active_workspace == 0) {
+        return game == NULL ? NULL : &game->nodes;
+    }
+    if (game->active_workspace > game->blueprints.count) {
+        return NULL;
+    }
+    return &game->blueprints.blueprints[game->active_workspace - 1].scene;
+}
+
+Relay_Blueprint *relay_game_active_blueprint(Relay_Game *game)
+{
+    if (game == NULL || game->active_workspace == 0 ||
+        game->active_workspace > game->blueprints.count) {
+        return NULL;
+    }
+    return &game->blueprints.blueprints[game->active_workspace - 1];
+}
+
+bool relay_game_create_blueprint(Relay_Game *game)
+{
+    Relay_BlueprintId id;
+
+    if (game == NULL) {
+        return false;
+    }
+    id = relay_blueprint_library_create(&game->blueprints);
+    if (id == 0) {
+        return false;
+    }
+    game->active_workspace = game->blueprints.count;
+    game->blueprints.blueprints[game->active_workspace - 1].workspace_open =
+        true;
+    relay_game_set_focused_node(game,
+        game->blueprints.blueprints[
+            game->active_workspace - 1].script_core_node_id);
+    game->active_tab = RELAY_GAME_PANEL_TAB_INSPECTOR;
+    game->workspace_mode = RELAY_GAME_WORKSPACE_GRAPH;
+    return true;
+}
+
+bool relay_game_switch_workspace(Relay_Game *game, int direction)
+{
+    size_t candidate;
+    size_t attempts;
+
+    if (game == NULL || direction == 0) {
+        return false;
+    }
+    candidate = game->active_workspace;
+    for (attempts = 0; attempts < game->blueprints.count + 1; attempts++) {
+        if (direction > 0) {
+            candidate = (candidate + 1) % (game->blueprints.count + 1);
+        } else {
+            candidate = candidate == 0 ? game->blueprints.count :
+                candidate - 1;
+        }
+        if (candidate == 0 ||
+            game->blueprints.blueprints[candidate - 1].workspace_open) {
+            return relay_game_activate_workspace(game, candidate);
+        }
+    }
+    return false;
+}
+
+bool relay_game_activate_workspace(Relay_Game *game, size_t workspace_index)
+{
+    if (game == NULL || workspace_index > game->blueprints.count ||
+        (workspace_index != 0 &&
+            !game->blueprints.blueprints[workspace_index - 1].workspace_open)) {
+        return false;
+    }
+    if (game->editing_blueprint_id != 0 &&
+        workspace_index != game->active_workspace) {
+        Relay_Blueprint *editing = relay_game_editing_blueprint(game);
+
+        if (editing != NULL) {
+            editing->editor_open = false;
+        }
+        game->editing_blueprint_id = 0;
+    }
+    game->active_workspace = workspace_index;
+    game->focused_node_id = workspace_index == 0 ?
+        game->root_focused_node_id :
+        game->blueprints.blueprints[workspace_index - 1].focused_node_id;
+    game->workspace_mode = RELAY_GAME_WORKSPACE_GRAPH;
+    return true;
+}
+
+bool relay_game_open_selected_blueprint(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint;
+
+    if (game == NULL || game->selected_blueprint >= game->blueprints.count) {
+        return false;
+    }
+    blueprint = &game->blueprints.blueprints[game->selected_blueprint];
+    blueprint->workspace_open = true;
+    return relay_game_activate_workspace(game, game->selected_blueprint + 1);
+}
+
+bool relay_game_close_active_blueprint(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint;
+
+    if (game == NULL || game->active_workspace == 0 ||
+        game->active_workspace > game->blueprints.count) {
+        return false;
+    }
+    blueprint = &game->blueprints.blueprints[game->active_workspace - 1];
+    blueprint->workspace_open = false;
+    if (game->editing_blueprint_id == blueprint->id) {
+        blueprint->editor_open = false;
+        game->editing_blueprint_id = 0;
+    }
+    return relay_game_activate_workspace(game, 0);
+}
+
+bool relay_game_add_blueprint(Relay_Game *game, Relay_BlueprintId blueprint_id)
+{
+    Relay_Blueprint *blueprint;
+    Relay_NodeWorld *world;
+    Relay_NodeId node_id;
+    Relay_Blueprint *active_blueprint;
+    const size_t old_count = game == NULL ? 0 :
+        relay_game_active_world(game)->count;
+    const Relay_NodeId old_next_id = game == NULL ? 0 :
+        relay_game_active_world(game)->next_id;
+
+    if (game == NULL || (game->active_workspace != 0 &&
+            game->blueprints.blueprints[game->active_workspace - 1].id ==
+                blueprint_id)) {
+        return false;
+    }
+    blueprint = relay_blueprint_library_find(&game->blueprints, blueprint_id);
+    world = relay_game_active_world(game);
+    active_blueprint = relay_game_active_blueprint(game);
+    if (blueprint == NULL || world == NULL || !blueprint->artifact.installed) {
+        return false;
+    }
+    if (active_blueprint == NULL) {
+        if (!relay_blueprint_instantiate(&game->blueprints, blueprint, world,
+                (int64_t)(world->count + 1) * RELAY_GAME_NODE_SPACING_X, 0,
+                &node_id)) {
+            return false;
+        }
+    } else {
+        Relay_Node *node;
+
+        node_id = relay_node_world_create_definition(world,
+            &blueprint->definition,
+            (int64_t)(world->count + 1) * RELAY_GAME_NODE_SPACING_X, 0);
+        if (node_id == 0) {
+            return false;
+        }
+        node = relay_node_world_find(world, node_id);
+        node->runtime_kind = RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER;
+        node->blueprint_id = blueprint_id;
+        if (!relay_blueprint_rebuild_plan(&game->blueprints,
+                active_blueprint)) {
+            world->count = old_count;
+            world->next_id = old_next_id;
+            return false;
+        }
+        blueprint->architecture_reference_count++;
+    }
+    relay_game_set_focused_node(game, node_id);
+    game->active_tab = RELAY_GAME_PANEL_TAB_INSPECTOR;
     return true;
 }
 
@@ -150,8 +370,7 @@ Relay_GameActionResult relay_game_handle_input(Relay_Game *game,
         return RELAY_GAME_ACTION_NONE;
     }
     if (input == RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) {
-        game->active_tab = game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
-            RELAY_GAME_PANEL_TAB_INSPECTOR : RELAY_GAME_PANEL_TAB_SHOP;
+        game->active_tab = (Relay_GamePanelTab)((game->active_tab + 1) % 3);
         game->last_action = RELAY_GAME_ACTION_NONE;
     } else if (input == RELAY_GAME_INPUT_PREVIOUS &&
         game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
@@ -165,13 +384,30 @@ Relay_GameActionResult relay_game_handle_input(Relay_Game *game,
     } else if (input == RELAY_GAME_INPUT_CONFIRM &&
         game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
         game->last_action = relay_game_purchase_selected(game);
+    } else if (input == RELAY_GAME_INPUT_PREVIOUS &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS &&
+        game->blueprints.count > 0) {
+        game->selected_blueprint = game->selected_blueprint == 0 ?
+            game->blueprints.count - 1 : game->selected_blueprint - 1;
+    } else if (input == RELAY_GAME_INPUT_NEXT &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS &&
+        game->blueprints.count > 0) {
+        game->selected_blueprint = (game->selected_blueprint + 1) %
+            game->blueprints.count;
+    } else if (input == RELAY_GAME_INPUT_CONFIRM &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS &&
+        game->selected_blueprint < game->blueprints.count) {
+        game->last_action = relay_game_add_blueprint(game,
+            game->blueprints.blueprints[game->selected_blueprint].id) ?
+            RELAY_GAME_ACTION_PURCHASED : RELAY_GAME_ACTION_CREATION_FAILED;
     } else if (input == RELAY_GAME_INPUT_TOGGLE_MAP) {
         game->workspace_mode = game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH ?
             RELAY_GAME_WORKSPACE_MAP : RELAY_GAME_WORKSPACE_GRAPH;
         game->last_action = RELAY_GAME_ACTION_NONE;
     } else if (input == RELAY_GAME_INPUT_PREVIOUS_CLOCK_RATE ||
         input == RELAY_GAME_INPUT_NEXT_CLOCK_RATE) {
-        focused = relay_node_world_find(&game->nodes, game->focused_node_id);
+        focused = relay_node_world_find(relay_game_active_world(game),
+            game->focused_node_id);
         if (focused != NULL && focused->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
             value.integer = relay_game_next_clock_period(focused->clock_period,
                 input == RELAY_GAME_INPUT_NEXT_CLOCK_RATE ? 1 : -1);
@@ -185,10 +421,323 @@ Relay_GameActionResult relay_game_handle_input(Relay_Game *game,
 
 bool relay_game_back(Relay_Game *game)
 {
-    if (game == NULL || game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH) {
+    Relay_Blueprint *editing;
+
+    if (game != NULL && game->editing_blueprint_id != 0) {
+        editing = relay_game_editing_blueprint(game);
+        if (editing != NULL) {
+            editing->editor_open = false;
+        }
+        game->editing_blueprint_id = 0;
+        return true;
+    }
+    if (game == NULL) {
         return false;
     }
-    game->workspace_mode = RELAY_GAME_WORKSPACE_GRAPH;
+    if (game->workspace_mode != RELAY_GAME_WORKSPACE_GRAPH) {
+        game->workspace_mode = RELAY_GAME_WORKSPACE_GRAPH;
+        return true;
+    }
+    if (game->active_workspace != 0) {
+        return relay_game_activate_workspace(game, 0);
+    }
+    return false;
+}
+
+Relay_Blueprint *relay_game_editing_blueprint(Relay_Game *game)
+{
+    return game == NULL ? NULL : relay_blueprint_library_find(
+        &game->blueprints, game->editing_blueprint_id);
+}
+
+bool relay_game_open_editor(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_active_blueprint(game);
+
+    if (game == NULL) {
+        return false;
+    }
+    if (blueprint == NULL && game->focused_node_id != 0) {
+        const Relay_Node *node = relay_node_world_find_const(
+            relay_game_active_world_const(game), game->focused_node_id);
+
+        if (node != NULL && node->blueprint_id != 0) {
+            blueprint = relay_blueprint_library_find(&game->blueprints,
+                node->blueprint_id);
+        }
+    }
+    if (blueprint == NULL) {
+        return false;
+    }
+    blueprint->editor_open = true;
+    blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_NORMAL;
+    blueprint->editor_command_size = 0;
+    blueprint->editor_command[0] = '\0';
+    game->editing_blueprint_id = blueprint->id;
+    return true;
+}
+
+bool relay_game_editor_insert(Relay_Game *game, uint32_t character)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL || (character != '\n' &&
+            (character < 32 || character > 126)) ||
+        blueprint->source_size + 1 >= RELAY_BLUEPRINT_SOURCE_CAPACITY) {
+        return false;
+    }
+    (void)memmove(&blueprint->source[blueprint->cursor + 1],
+        &blueprint->source[blueprint->cursor],
+        blueprint->source_size - blueprint->cursor + 1);
+    blueprint->source[blueprint->cursor++] = (char)character;
+    blueprint->source_size++;
+    blueprint->revision++;
+    blueprint->dirty = true;
+    return true;
+}
+
+bool relay_game_editor_backspace(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL || blueprint->cursor == 0) {
+        return false;
+    }
+    (void)memmove(&blueprint->source[blueprint->cursor - 1],
+        &blueprint->source[blueprint->cursor],
+        blueprint->source_size - blueprint->cursor + 1);
+    blueprint->cursor--;
+    blueprint->source_size--;
+    blueprint->revision++;
+    blueprint->dirty = true;
+    return true;
+}
+
+bool relay_game_editor_delete(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL || blueprint->cursor >= blueprint->source_size) {
+        return false;
+    }
+    (void)memmove(&blueprint->source[blueprint->cursor],
+        &blueprint->source[blueprint->cursor + 1],
+        blueprint->source_size - blueprint->cursor);
+    blueprint->source_size--;
+    blueprint->revision++;
+    blueprint->dirty = true;
+    return true;
+}
+
+bool relay_game_editor_move_horizontal(Relay_Game *game, int direction)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL || direction == 0 ||
+        (direction < 0 && blueprint->cursor == 0) ||
+        (direction > 0 && blueprint->cursor >= blueprint->source_size)) {
+        return false;
+    }
+    blueprint->cursor = direction < 0 ? blueprint->cursor - 1 :
+        blueprint->cursor + 1;
+    return true;
+}
+
+/** Return the byte offset and column of the line containing a cursor. */
+static size_t relay_game_editor_line_start(const Relay_Blueprint *blueprint,
+    size_t cursor, size_t *column)
+{
+    size_t start = cursor;
+
+    while (start > 0 && blueprint->source[start - 1] != '\n') {
+        start--;
+    }
+    *column = cursor - start;
+    return start;
+}
+
+bool relay_game_editor_move_vertical(Relay_Game *game, int direction)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+    size_t column;
+    size_t line_start;
+    size_t target_start;
+    size_t target_end;
+
+    if (blueprint == NULL || direction == 0) {
+        return false;
+    }
+    line_start = relay_game_editor_line_start(blueprint, blueprint->cursor,
+        &column);
+    if (direction < 0) {
+        if (line_start == 0) {
+            return false;
+        }
+        target_end = line_start - 1;
+        target_start = target_end;
+        while (target_start > 0 &&
+            blueprint->source[target_start - 1] != '\n') {
+            target_start--;
+        }
+    } else {
+        target_start = line_start;
+        while (target_start < blueprint->source_size &&
+            blueprint->source[target_start] != '\n') {
+            target_start++;
+        }
+        if (target_start >= blueprint->source_size) {
+            return false;
+        }
+        target_start++;
+        target_end = target_start;
+        while (target_end < blueprint->source_size &&
+            blueprint->source[target_end] != '\n') {
+            target_end++;
+        }
+    }
+    blueprint->cursor = target_start +
+        (column < target_end - target_start ? column : target_end - target_start);
+    return true;
+}
+
+bool relay_game_editor_move_line_boundary(Relay_Game *game, bool to_end)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+    size_t column;
+    size_t boundary;
+
+    if (blueprint == NULL) {
+        return false;
+    }
+    boundary = relay_game_editor_line_start(blueprint, blueprint->cursor,
+        &column);
+    if (to_end) {
+        while (boundary < blueprint->source_size &&
+            blueprint->source[boundary] != '\n') {
+            boundary++;
+        }
+    }
+    blueprint->cursor = boundary;
+    return true;
+}
+
+bool relay_game_editor_enter_insert(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL) {
+        return false;
+    }
+    blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_INSERT;
+    return true;
+}
+
+bool relay_game_editor_enter_command(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL) {
+        return false;
+    }
+    blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_COMMAND;
+    blueprint->editor_command_size = 0;
+    blueprint->editor_command[0] = '\0';
+    return true;
+}
+
+bool relay_game_editor_leave_mode(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL ||
+        blueprint->editor_mode == RELAY_BLUEPRINT_EDITOR_NORMAL) {
+        return false;
+    }
+    blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_NORMAL;
+    blueprint->editor_command_size = 0;
+    blueprint->editor_command[0] = '\0';
+    return true;
+}
+
+bool relay_game_editor_command_insert(Relay_Game *game, uint32_t character)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL ||
+        blueprint->editor_mode != RELAY_BLUEPRINT_EDITOR_COMMAND ||
+        character < 32 || character > 126 ||
+        blueprint->editor_command_size + 1 >=
+            sizeof(blueprint->editor_command)) {
+        return false;
+    }
+    blueprint->editor_command[blueprint->editor_command_size++] =
+        (char)character;
+    blueprint->editor_command[blueprint->editor_command_size] = '\0';
+    return true;
+}
+
+bool relay_game_editor_command_backspace(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    if (blueprint == NULL ||
+        blueprint->editor_mode != RELAY_BLUEPRINT_EDITOR_COMMAND ||
+        blueprint->editor_command_size == 0) {
+        return false;
+    }
+    blueprint->editor_command[--blueprint->editor_command_size] = '\0';
+    return true;
+}
+
+Relay_GameEditorCommandResult relay_game_editor_command_execute(
+    Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+    bool close_after_save;
+
+    if (blueprint == NULL ||
+        blueprint->editor_mode != RELAY_BLUEPRINT_EDITOR_COMMAND) {
+        return RELAY_GAME_EDITOR_COMMAND_NONE;
+    }
+    close_after_save = strcmp(blueprint->editor_command, "wq") == 0;
+    if (strcmp(blueprint->editor_command, "w") == 0 || close_after_save) {
+        blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_NORMAL;
+        if (!relay_game_editor_save(game)) {
+            return RELAY_GAME_EDITOR_COMMAND_FAILED;
+        }
+        if (close_after_save) {
+            (void)relay_game_back(game);
+            return RELAY_GAME_EDITOR_COMMAND_CLOSED;
+        }
+        return RELAY_GAME_EDITOR_COMMAND_SAVED;
+    }
+    if (strcmp(blueprint->editor_command, "q") == 0) {
+        blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_NORMAL;
+        (void)relay_game_back(game);
+        return RELAY_GAME_EDITOR_COMMAND_CLOSED;
+    }
+    (void)snprintf(blueprint->diagnostic.message,
+        sizeof(blueprint->diagnostic.message),
+        "Unknown editor command: :%s", blueprint->editor_command);
+    blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_NORMAL;
+    return RELAY_GAME_EDITOR_COMMAND_FAILED;
+}
+
+bool relay_game_editor_save(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+
+    return blueprint != NULL &&
+        relay_blueprint_compile(&game->blueprints, blueprint);
+}
+
+bool relay_game_select_panel_tab(Relay_Game *game, size_t tab_index)
+{
+    if (game == NULL || tab_index > RELAY_GAME_PANEL_TAB_BLUEPRINTS) {
+        return false;
+    }
+    game->active_tab = (Relay_GamePanelTab)tab_index;
+    game->last_action = RELAY_GAME_ACTION_NONE;
     return true;
 }
 
@@ -212,18 +761,19 @@ bool relay_game_move_node(Relay_Game *game, Relay_NodeId id, int delta_x,
     if (game == NULL) {
         return false;
     }
-    node = relay_node_world_find(&game->nodes, id);
-    return node != NULL && relay_node_world_move(&game->nodes, id,
+    node = relay_node_world_find(relay_game_active_world(game), id);
+    return node != NULL && relay_node_world_move(relay_game_active_world(game), id,
         relay_game_add_delta(node->grid_x, delta_x),
         relay_game_add_delta(node->grid_y, delta_y));
 }
 
 bool relay_game_focus_node(Relay_Game *game, Relay_NodeId id)
 {
-    if (game == NULL || relay_node_world_find(&game->nodes, id) == NULL) {
+    if (game == NULL || relay_node_world_find(relay_game_active_world(game), id) ==
+            NULL) {
         return false;
     }
-    game->focused_node_id = id;
+    relay_game_set_focused_node(game, id);
     game->active_tab = RELAY_GAME_PANEL_TAB_INSPECTOR;
     return true;
 }
@@ -232,37 +782,156 @@ bool relay_game_connect_nodes(Relay_Game *game, Relay_NodeId source_node_id,
     size_t source_port_index, Relay_NodeId destination_node_id,
     size_t destination_port_index)
 {
-    if (game == NULL || !relay_node_world_connect(&game->nodes, source_node_id,
+    Relay_NodeWorld *world;
+    Relay_Blueprint *blueprint;
+    Relay_NodeConnection previous = {0};
+    size_t previous_index = 0;
+    size_t previous_count;
+    size_t index;
+    bool replaced = false;
+
+    if (game == NULL) {
+        return false;
+    }
+    world = relay_game_active_world(game);
+    blueprint = relay_game_active_blueprint(game);
+    previous_count = world->connection_count;
+    for (index = 0; index < previous_count; index++) {
+        if (world->connections[index].destination_node_id ==
+                destination_node_id &&
+            world->connections[index].destination_port_index ==
+                destination_port_index) {
+            previous = world->connections[index];
+            previous_index = index;
+            replaced = true;
+            break;
+        }
+    }
+    if (!relay_node_world_connect(world,
+            source_node_id,
             source_port_index, destination_node_id, destination_port_index)) {
+        return false;
+    }
+    if (blueprint != NULL &&
+        !relay_blueprint_rebuild_plan(&game->blueprints, blueprint)) {
+        if (replaced) {
+            world->connections[previous_index] = previous;
+        } else {
+            world->connection_count = previous_count;
+        }
         return false;
     }
     return true;
 }
 
-bool relay_game_step(Relay_Game *game)
+/** Execute one compiled script module node from the world's input snapshot. */
+static void relay_game_step_script(Relay_Game *game, Relay_NodeWorld *world,
+    Relay_Node *node)
+{
+    Relay_Blueprint *blueprint = relay_blueprint_library_find(
+        &game->blueprints, node->blueprint_id);
+    int64_t inputs[RELAY_NODE_MAX_PORTS] = {0};
+    int64_t outputs[RELAY_NODE_MAX_PORTS] = {0};
+    size_t index;
+
+    if (blueprint == NULL) {
+        return;
+    }
+    for (index = 0; index < blueprint->schema.input_count; index++) {
+        inputs[index] = relay_game_input_value(game, world, node, index);
+    }
+    if (relay_script_runtime_invoke(game->script_runtime, &blueprint->artifact,
+            &node->script_state, &blueprint->schema, inputs, outputs,
+            &blueprint->diagnostic)) {
+        for (index = 0; index < blueprint->schema.output_count; index++) {
+            node->output_values[index] = outputs[index];
+        }
+    }
+}
+
+/** Advance one node world through snapshots, sources, modules, and processors. */
+static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
 {
     size_t index;
 
-    if (game == NULL) {
-        return false;
-    }
-    for (index = 0; index < game->nodes.count; index++) {
-        Relay_Node *node = &game->nodes.nodes[index];
+    for (index = 0; index < world->count; index++) {
+        Relay_Node *node = &world->nodes[index];
+        size_t port_index;
 
-        node->previous_output_value = node->output_value;
-        node->output_value = 0;
+        for (port_index = 0; port_index < RELAY_NODE_MAX_PORTS; port_index++) {
+            node->previous_output_values[port_index] =
+                node->output_values[port_index];
+            node->output_values[port_index] = 0;
+        }
 
         if (node->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
             relay_game_step_clock(node);
         }
     }
-    for (index = 0; index < game->nodes.count; index++) {
-        Relay_Node *node = &game->nodes.nodes[index];
+    for (index = 0; index < world->count; index++) {
+        Relay_Node *node = &world->nodes[index];
 
-        if (node->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
-            relay_game_step_coal_miner(game, node);
+        if (node->runtime_kind ==
+                RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+            relay_game_step_script(game, world, node);
         }
     }
+    for (index = 0; index < world->count; index++) {
+        Relay_Node *node = &world->nodes[index];
+
+        if (node->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
+            const int64_t fuel_input = relay_game_input_value(game, world,
+                node, 1);
+
+            node->output_values[0] = 0;
+            if (fuel_input > 0) node->fuel_coal += fuel_input;
+            if (!node->enabled ||
+                relay_game_input_value(game, world, node, 0) <= 0) continue;
+            if (!node->processing) {
+                if (node->fuel_coal <= 0) continue;
+                node->fuel_coal--;
+                node->processing = true;
+            }
+            node->progress++;
+            if (node->progress >= RELAY_GAME_COAL_REQUIRED_PULSES) {
+                node->progress = 0;
+                node->produced++;
+                node->output_values[0] = 1;
+                node->processing = false;
+            }
+        }
+    }
+    for (index = 0; index < world->module_output_binding_count; index++) {
+        const Relay_NodeModuleOutputBinding *binding =
+            &world->module_output_bindings[index];
+        Relay_Node *module = relay_node_world_find(world,
+            binding->module_node_id);
+
+        if (module == NULL) {
+            continue;
+        }
+        if (binding->source_is_module_input) {
+            module->output_values[binding->module_port_index] =
+                relay_game_input_value(game, world, module,
+                    binding->source_module_input_port_index);
+        } else {
+            const Relay_Node *source = relay_node_world_find_const(world,
+                binding->source_node_id);
+
+            if (source != NULL) {
+                module->output_values[binding->module_port_index] =
+                    source->output_values[binding->source_port_index];
+            }
+        }
+    }
+}
+
+bool relay_game_step(Relay_Game *game)
+{
+    if (game == NULL || game->script_runtime == NULL) {
+        return false;
+    }
+    relay_game_step_world(game, &game->nodes);
     game->simulation_tick++;
     return true;
 }
@@ -298,7 +967,14 @@ const char *relay_game_action_result_label(Relay_GameActionResult result)
 void relay_game_shutdown(Relay_Game *game)
 {
     if (game != NULL) {
+        size_t index;
+
+        for (index = 0; index < game->nodes.count; index++) {
+            relay_script_instance_shutdown(game->script_runtime,
+                &game->nodes.nodes[index].script_state);
+        }
         relay_node_world_shutdown(&game->nodes);
+        relay_blueprint_library_shutdown(&game->blueprints);
         *game = (Relay_Game){0};
     }
 }

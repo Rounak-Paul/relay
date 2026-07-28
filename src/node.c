@@ -22,17 +22,17 @@ static const Relay_NodePropertyDefinition relay_coal_miner_properties[] = {
 
 /** Ports for the player-controlled infinite clock resource. */
 static const Relay_NodePortDefinition relay_clock_outputs[] = {
-    {"clock", "Clock", RELAY_NODE_VALUE_INTEGER}
+    {"clock", "Clock", RELAY_NODE_PORT_TYPE_CLOCK}
 };
 
 /** Ports for a coal miner that consumes clock pulses. */
 static const Relay_NodePortDefinition relay_coal_miner_inputs[] = {
-    {"clock", "Clock", RELAY_NODE_VALUE_INTEGER},
-    {"fuel", "Fuel", RELAY_NODE_VALUE_INTEGER}
+    {"clock", "Clock", RELAY_NODE_PORT_TYPE_CLOCK},
+    {"fuel", "Fuel", RELAY_NODE_PORT_TYPE_COAL}
 };
 
 static const Relay_NodePortDefinition relay_coal_miner_outputs[] = {
-    {"coal", "Coal", RELAY_NODE_VALUE_INTEGER}
+    {"coal", "Coal", RELAY_NODE_PORT_TYPE_COAL}
 };
 
 /** Immutable built-in module catalog with script-stable identifiers and keys. */
@@ -97,6 +97,30 @@ static bool relay_node_world_grow_connections(Relay_NodeWorld *world)
     return true;
 }
 
+/** Grow one dynamically allocated module-binding array. */
+static bool relay_node_world_grow_bindings(void **storage, size_t *capacity,
+    size_t count, size_t element_size)
+{
+    size_t next_capacity;
+    void *bindings;
+
+    if (count < *capacity) {
+        return true;
+    }
+    if (*capacity > SIZE_MAX / 2 ||
+        (*capacity != 0 && *capacity * 2 > SIZE_MAX / element_size)) {
+        return false;
+    }
+    next_capacity = *capacity == 0 ? 16 : *capacity * 2;
+    bindings = realloc(*storage, next_capacity * element_size);
+    if (bindings == NULL) {
+        return false;
+    }
+    *storage = bindings;
+    *capacity = next_capacity;
+    return true;
+}
+
 /** Find a definition property by its script-stable key. */
 static const Relay_NodePropertyDefinition *relay_node_property_definition_find(
     const Relay_NodeDefinition *definition, const char *key)
@@ -127,12 +151,20 @@ bool relay_node_world_init(Relay_NodeWorld *world)
 Relay_NodeId relay_node_world_create(Relay_NodeWorld *world,
     Relay_NodeDefinitionId definition_id, int64_t grid_x, int64_t grid_y)
 {
-    const Relay_NodeDefinition *definition;
+    return relay_node_world_create_definition(world,
+        relay_node_definition_find(definition_id), grid_x, grid_y);
+}
+
+Relay_NodeId relay_node_world_create_definition(Relay_NodeWorld *world,
+    const Relay_NodeDefinition *definition, int64_t grid_x, int64_t grid_y)
+{
     Relay_Node *node;
     Relay_NodeId id;
 
-    definition = relay_node_definition_find(definition_id);
-    if (world == NULL || definition == NULL || !relay_node_world_grow(world)) {
+    if (world == NULL || definition == NULL ||
+        definition->input_count > RELAY_NODE_MAX_PORTS ||
+        definition->output_count > RELAY_NODE_MAX_PORTS ||
+        !relay_node_world_grow(world)) {
         return 0;
     }
     id = world->next_id++;
@@ -146,11 +178,12 @@ Relay_NodeId relay_node_world_create(Relay_NodeWorld *world,
     *node = (Relay_Node){0};
     node->id = id;
     node->definition_id = definition->id;
+    node->definition = definition;
     node->grid_x = grid_x;
     node->grid_y = grid_y;
     node->clock_period = 2;
     node->enabled = true;
-    node->fuel_coal = definition_id == RELAY_NODE_DEFINITION_COAL_MINER ? 1 : 0;
+    node->fuel_coal = definition->id == RELAY_NODE_DEFINITION_COAL_MINER ? 1 : 0;
     return id;
 }
 
@@ -185,6 +218,11 @@ const Relay_Node *relay_node_world_find_const(const Relay_NodeWorld *world,
     return NULL;
 }
 
+const Relay_NodeDefinition *relay_node_definition_for(const Relay_Node *node)
+{
+    return node == NULL ? NULL : node->definition;
+}
+
 bool relay_node_world_move(Relay_NodeWorld *world, Relay_NodeId id,
     int64_t grid_x, int64_t grid_y)
 {
@@ -196,6 +234,31 @@ bool relay_node_world_move(Relay_NodeWorld *world, Relay_NodeId id,
     node->grid_x = grid_x;
     node->grid_y = grid_y;
     return true;
+}
+
+/** Return a stable display label for a fixed graph port type. */
+const char *relay_node_port_type_name(Relay_NodePortType type)
+{
+    switch (type) {
+    case RELAY_NODE_PORT_TYPE_CLOCK: return "Clock";
+    case RELAY_NODE_PORT_TYPE_COAL: return "Coal";
+    case RELAY_NODE_PORT_TYPE_IRON_ORE: return "Iron Ore";
+    case RELAY_NODE_PORT_TYPE_COPPER_ORE: return "Copper Ore";
+    case RELAY_NODE_PORT_TYPE_STONE: return "Stone";
+    case RELAY_NODE_PORT_TYPE_BOOLEAN: return "Boolean";
+    case RELAY_NODE_PORT_TYPE_INTEGER: return "Integer";
+    case RELAY_NODE_PORT_TYPE_TEXT: return "Text";
+    case RELAY_NODE_PORT_TYPE_INVALID: return "Invalid";
+    }
+    return "Invalid";
+}
+
+/** Check exact fixed-type compatibility for a graph connection. */
+bool relay_node_port_types_compatible(Relay_NodePortType source_type,
+    Relay_NodePortType destination_type)
+{
+    return source_type != RELAY_NODE_PORT_TYPE_INVALID &&
+        source_type == destination_type;
 }
 
 bool relay_node_world_connect(Relay_NodeWorld *world, Relay_NodeId source_node_id,
@@ -213,15 +276,14 @@ bool relay_node_world_connect(Relay_NodeWorld *world, Relay_NodeId source_node_i
     }
     source = relay_node_world_find_const(world, source_node_id);
     destination = relay_node_world_find_const(world, destination_node_id);
-    source_definition = source == NULL ? NULL :
-        relay_node_definition_find(source->definition_id);
-    destination_definition = destination == NULL ? NULL :
-        relay_node_definition_find(destination->definition_id);
+    source_definition = relay_node_definition_for(source);
+    destination_definition = relay_node_definition_for(destination);
     if (source_definition == NULL || destination_definition == NULL ||
         source_port_index >= source_definition->output_count ||
         destination_port_index >= destination_definition->input_count ||
-        source_definition->outputs[source_port_index].value_type !=
-            destination_definition->inputs[destination_port_index].value_type) {
+        !relay_node_port_types_compatible(
+            source_definition->outputs[source_port_index].type,
+            destination_definition->inputs[destination_port_index].type)) {
         return false;
     }
     for (index = 0; index < world->connection_count; index++) {
@@ -263,6 +325,94 @@ const Relay_NodeConnection *relay_node_world_connection_to(
     return NULL;
 }
 
+bool relay_node_world_bind_module_input(Relay_NodeWorld *world,
+    Relay_NodeModuleInputBinding binding)
+{
+    const Relay_Node *module;
+    const Relay_Node *destination;
+    const Relay_NodeDefinition *module_definition;
+    const Relay_NodeDefinition *destination_definition;
+
+    if (world == NULL) {
+        return false;
+    }
+    module = relay_node_world_find_const(world, binding.module_node_id);
+    destination = relay_node_world_find_const(world,
+        binding.destination_node_id);
+    module_definition = relay_node_definition_for(module);
+    destination_definition = relay_node_definition_for(destination);
+    if (module == NULL || destination == NULL ||
+        module->runtime_kind != RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER ||
+        module_definition == NULL || destination_definition == NULL ||
+        binding.module_port_index >= module_definition->input_count ||
+        binding.destination_port_index >= destination_definition->input_count ||
+        !relay_node_port_types_compatible(
+            module_definition->inputs[binding.module_port_index].type,
+            destination_definition->inputs[
+                binding.destination_port_index].type) ||
+        !relay_node_world_grow_bindings(
+            (void **)&world->module_input_bindings,
+            &world->module_input_binding_capacity,
+            world->module_input_binding_count,
+            sizeof(*world->module_input_bindings))) {
+        return false;
+    }
+    world->module_input_bindings[world->module_input_binding_count++] = binding;
+    return true;
+}
+
+bool relay_node_world_bind_module_output(Relay_NodeWorld *world,
+    Relay_NodeModuleOutputBinding binding)
+{
+    const Relay_Node *module;
+    const Relay_NodeDefinition *module_definition;
+    Relay_NodePortType source_type;
+
+    if (world == NULL) {
+        return false;
+    }
+    module = relay_node_world_find_const(world, binding.module_node_id);
+    module_definition = relay_node_definition_for(module);
+    if (module == NULL ||
+        module->runtime_kind != RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER ||
+        module_definition == NULL ||
+        binding.module_port_index >= module_definition->output_count) {
+        return false;
+    }
+    if (binding.source_is_module_input) {
+        if (binding.source_module_input_port_index >=
+                module_definition->input_count) {
+            return false;
+        }
+        source_type = module_definition->inputs[
+            binding.source_module_input_port_index].type;
+    } else {
+        const Relay_Node *source = relay_node_world_find_const(world,
+            binding.source_node_id);
+        const Relay_NodeDefinition *source_definition =
+            relay_node_definition_for(source);
+
+        if (source_definition == NULL ||
+            binding.source_port_index >= source_definition->output_count) {
+            return false;
+        }
+        source_type = source_definition->outputs[
+            binding.source_port_index].type;
+    }
+    if (!relay_node_port_types_compatible(source_type,
+            module_definition->outputs[binding.module_port_index].type) ||
+        !relay_node_world_grow_bindings(
+            (void **)&world->module_output_bindings,
+            &world->module_output_binding_capacity,
+            world->module_output_binding_count,
+            sizeof(*world->module_output_bindings))) {
+        return false;
+    }
+    world->module_output_bindings[world->module_output_binding_count++] =
+        binding;
+    return true;
+}
+
 void relay_node_world_shutdown(Relay_NodeWorld *world)
 {
     if (world == NULL) {
@@ -270,6 +420,8 @@ void relay_node_world_shutdown(Relay_NodeWorld *world)
     }
     free(world->nodes);
     free(world->connections);
+    free(world->module_input_bindings);
+    free(world->module_output_bindings);
     *world = (Relay_NodeWorld){0};
 }
 
@@ -320,7 +472,7 @@ bool relay_node_property_get(const Relay_Node *node, const char *key,
     if (node == NULL || key == NULL || value == NULL || value_type == NULL) {
         return false;
     }
-    definition = relay_node_definition_find(node->definition_id);
+    definition = relay_node_definition_for(node);
     property = relay_node_property_definition_find(definition, key);
     if (property == NULL) {
         return false;
@@ -351,7 +503,7 @@ bool relay_node_property_set(Relay_Node *node, const char *key,
     if (node == NULL || key == NULL) {
         return false;
     }
-    definition = relay_node_definition_find(node->definition_id);
+    definition = relay_node_definition_for(node);
     property = relay_node_property_definition_find(definition, key);
     if (property == NULL || !property->writable ||
         property->value_type != value_type) {

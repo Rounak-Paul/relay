@@ -66,6 +66,116 @@ static void relay_app_back(Relay_App *app)
     }
 }
 
+/** Apply one normalized terminal event to the modal Blueprint source editor. */
+static void relay_app_handle_editor_input(Relay_App *app,
+    const Relay_TerminalEvent *event)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(&app->game);
+
+    if (blueprint == NULL) {
+        return;
+    }
+    if (blueprint->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND) {
+        if (event->key == RELAY_TERMINAL_KEY_ESCAPE) {
+            (void)relay_game_editor_leave_mode(&app->game);
+        } else if (event->key == RELAY_TERMINAL_KEY_BACKSPACE) {
+            (void)relay_game_editor_command_backspace(&app->game);
+        } else if (event->key == RELAY_TERMINAL_KEY_CONFIRM) {
+            const Relay_GameEditorCommandResult result =
+                relay_game_editor_command_execute(&app->game);
+
+            if (result == RELAY_GAME_EDITOR_COMMAND_SAVED ||
+                result == RELAY_GAME_EDITOR_COMMAND_FAILED) {
+                relay_logger_log(&app->logger,
+                    result == RELAY_GAME_EDITOR_COMMAND_SAVED ?
+                        RELAY_LOG_LEVEL_INFO : RELAY_LOG_LEVEL_WARNING,
+                    "%s", blueprint->diagnostic.message);
+            }
+        } else if (event->character >= 32 && event->character <= 126) {
+            (void)relay_game_editor_command_insert(&app->game,
+                event->character);
+        }
+        return;
+    }
+    if (blueprint->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT) {
+        if (event->key == RELAY_TERMINAL_KEY_ESCAPE) {
+            (void)relay_game_editor_leave_mode(&app->game);
+        } else if (event->key == RELAY_TERMINAL_KEY_UP ||
+            event->key == RELAY_TERMINAL_KEY_DOWN) {
+            (void)relay_game_editor_move_vertical(&app->game,
+                event->key == RELAY_TERMINAL_KEY_UP ? -1 : 1);
+        } else if (event->key == RELAY_TERMINAL_KEY_LEFT ||
+            event->key == RELAY_TERMINAL_KEY_RIGHT) {
+            (void)relay_game_editor_move_horizontal(&app->game,
+                event->key == RELAY_TERMINAL_KEY_LEFT ? -1 : 1);
+        } else if (event->key == RELAY_TERMINAL_KEY_HOME ||
+            event->key == RELAY_TERMINAL_KEY_END) {
+            (void)relay_game_editor_move_line_boundary(&app->game,
+                event->key == RELAY_TERMINAL_KEY_END);
+        } else if (event->key == RELAY_TERMINAL_KEY_BACKSPACE) {
+            (void)relay_game_editor_backspace(&app->game);
+        } else if (event->key == RELAY_TERMINAL_KEY_DELETE) {
+            (void)relay_game_editor_delete(&app->game);
+        } else if (event->key == RELAY_TERMINAL_KEY_CONFIRM) {
+            (void)relay_game_editor_insert(&app->game, '\n');
+        } else if (event->character >= 32 && event->character <= 126) {
+            (void)relay_game_editor_insert(&app->game, event->character);
+        }
+        return;
+    }
+
+    if (event->key == RELAY_TERMINAL_KEY_ESCAPE) {
+        relay_app_back(app);
+    } else if (event->character == ':') {
+        (void)relay_game_editor_enter_command(&app->game);
+    } else if (event->character == 'i') {
+        (void)relay_game_editor_enter_insert(&app->game);
+    } else if (event->character == 'a') {
+        if (blueprint->cursor < blueprint->source_size &&
+            blueprint->source[blueprint->cursor] != '\n') {
+            (void)relay_game_editor_move_horizontal(&app->game, 1);
+        }
+        (void)relay_game_editor_enter_insert(&app->game);
+    } else if (event->character == 'I') {
+        (void)relay_game_editor_move_line_boundary(&app->game, false);
+        (void)relay_game_editor_enter_insert(&app->game);
+    } else if (event->character == 'A') {
+        (void)relay_game_editor_move_line_boundary(&app->game, true);
+        (void)relay_game_editor_enter_insert(&app->game);
+    } else if (event->character == 'o') {
+        (void)relay_game_editor_move_line_boundary(&app->game, true);
+        (void)relay_game_editor_insert(&app->game, '\n');
+        (void)relay_game_editor_enter_insert(&app->game);
+    } else if (event->character == 'x' ||
+        event->key == RELAY_TERMINAL_KEY_DELETE) {
+        (void)relay_game_editor_delete(&app->game);
+    } else if (event->character == '0' ||
+        event->key == RELAY_TERMINAL_KEY_HOME) {
+        (void)relay_game_editor_move_line_boundary(&app->game, false);
+    } else if (event->character == '$' ||
+        event->key == RELAY_TERMINAL_KEY_END) {
+        (void)relay_game_editor_move_line_boundary(&app->game, true);
+    } else if (event->character == 'h' ||
+        event->key == RELAY_TERMINAL_KEY_LEFT) {
+        (void)relay_game_editor_move_horizontal(&app->game, -1);
+    } else if (event->character == 'l' ||
+        event->key == RELAY_TERMINAL_KEY_RIGHT) {
+        (void)relay_game_editor_move_horizontal(&app->game, 1);
+    } else if (event->character == 'k' ||
+        event->key == RELAY_TERMINAL_KEY_UP) {
+        (void)relay_game_editor_move_vertical(&app->game, -1);
+    } else if (event->character == 'j' ||
+        event->key == RELAY_TERMINAL_KEY_DOWN) {
+        (void)relay_game_editor_move_vertical(&app->game, 1);
+    } else if (event->key == RELAY_TERMINAL_KEY_SAVE) {
+        const bool saved = relay_game_editor_save(&app->game);
+
+        relay_logger_log(&app->logger,
+            saved ? RELAY_LOG_LEVEL_INFO : RELAY_LOG_LEVEL_WARNING,
+            "%s", blueprint->diagnostic.message);
+    }
+}
+
 /** React to a main-thread event emitted by Relay runtime services. */
 static void relay_app_on_event(const Relay_Event *event, void *context)
 {
@@ -103,9 +213,25 @@ bool relay_app_init(Relay_App *app)
 
     relay_logger_log(&app->logger, RELAY_LOG_LEVEL_INFO,
         "Relay application initialization started.");
-    if (relay_departure_mono_font()->size == 0 || !relay_game_init(&app->game)) {
+    if (relay_departure_mono_font()->size == 0) {
         relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
-            "Game state or embedded font initialization failed.");
+            "Embedded font initialization failed.");
+        app->state = RELAY_APP_STATE_FAILED;
+        return false;
+    }
+    if (!relay_script_runtime_init(&app->scripts,
+            RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT)) {
+        relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
+            "Sandboxed Lua runtime initialization failed.");
+        app->state = RELAY_APP_STATE_FAILED;
+        return false;
+    }
+    relay_logger_log(&app->logger, RELAY_LOG_LEVEL_INFO,
+        "%s scripting runtime initialized with a %zu-byte memory limit.",
+        relay_script_runtime_version(), app->scripts.memory_limit);
+    if (!relay_game_init(&app->game, &app->scripts)) {
+        relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
+            "Game state initialization failed.");
         app->state = RELAY_APP_STATE_FAILED;
         return false;
     }
@@ -198,7 +324,10 @@ int relay_app_run(Relay_App *app)
         } else if (event.type == RELAY_TERMINAL_EVENT_INPUT) {
             Relay_GameActionResult result = RELAY_GAME_ACTION_NONE;
 
-            if (app->overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM) {
+            if (app->game.editing_blueprint_id != 0 &&
+                app->overlay == RELAY_TERMINAL_OVERLAY_NONE) {
+                relay_app_handle_editor_input(app, &event);
+            } else if (app->overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM) {
                 if (event.key == RELAY_TERMINAL_KEY_CONFIRM) {
                     app->should_exit = true;
                     continue;
@@ -208,6 +337,35 @@ int relay_app_run(Relay_App *app)
                 }
             } else if (event.key == RELAY_TERMINAL_KEY_ESCAPE) {
                 relay_app_back(app);
+            } else if (event.character == 'n' || event.character == 'N') {
+                if (!relay_game_create_blueprint(&app->game)) {
+                    relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
+                        "Blueprint creation failed.");
+                } else {
+                    relay_terminal_focus_node(&app->terminal, &app->game,
+                        app->game.focused_node_id);
+                }
+            } else if (event.character == ',') {
+                (void)relay_game_switch_workspace(&app->game, -1);
+            } else if (event.character == '.') {
+                (void)relay_game_switch_workspace(&app->game, 1);
+            } else if (event.character == 'e' || event.character == 'E') {
+                if (!relay_game_open_editor(&app->game)) {
+                    relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
+                        "No blueprint is available for editing.");
+                }
+            } else if ((event.character == 'o' || event.character == 'O') &&
+                app->game.active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS) {
+                if (!relay_game_open_selected_blueprint(&app->game)) {
+                    relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
+                        "The selected Blueprint could not be opened.");
+                }
+            } else if (event.character == 'c' || event.character == 'C') {
+                if (!relay_game_close_active_blueprint(&app->game) &&
+                    app->game.active_workspace != 0) {
+                    relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
+                        "The active Blueprint tab could not be closed.");
+                }
             } else {
                 result = relay_game_handle_input(&app->game,
                     relay_app_game_input(&event));
@@ -229,9 +387,13 @@ int relay_app_run(Relay_App *app)
                 return 1;
             }
         } else if (event.type == RELAY_TERMINAL_EVENT_MOUSE) {
-            if (event.panel_tab_clicked) {
-                (void)relay_game_handle_input(&app->game,
-                    RELAY_GAME_INPUT_TOGGLE_PANEL_TAB);
+            if (event.workspace_tab_index_plus_one != 0) {
+                (void)relay_game_activate_workspace(&app->game,
+                    event.workspace_tab_index_plus_one - 1);
+            }
+            if (event.panel_tab_index_plus_one != 0) {
+                (void)relay_game_select_panel_tab(&app->game,
+                    event.panel_tab_index_plus_one - 1);
             }
             if (event.selected_node_id != 0 &&
                 !relay_game_focus_node(&app->game, event.selected_node_id)) {
@@ -285,6 +447,7 @@ void relay_app_shutdown(Relay_App *app)
     app->state = RELAY_APP_STATE_SHUTTING_DOWN;
     relay_terminal_shutdown(&app->terminal);
     relay_game_shutdown(&app->game);
+    relay_script_runtime_shutdown(&app->scripts);
     relay_job_system_shutdown(&app->jobs);
     relay_event_bus_shutdown(&app->events);
     relay_logger_log(&app->logger, RELAY_LOG_LEVEL_INFO,

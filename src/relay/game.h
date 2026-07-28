@@ -1,7 +1,9 @@
 #ifndef RELAY_GAME_H
 #define RELAY_GAME_H
 
+#include "relay/blueprint.h"
 #include "relay/node.h"
+#include "relay/script_runtime.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -13,7 +15,8 @@ typedef uint64_t Relay_Currency;
 /** Tabs currently available in Relay's right-side control panel. */
 typedef enum Relay_GamePanelTab {
     RELAY_GAME_PANEL_TAB_SHOP,
-    RELAY_GAME_PANEL_TAB_INSPECTOR
+    RELAY_GAME_PANEL_TAB_INSPECTOR,
+    RELAY_GAME_PANEL_TAB_BLUEPRINTS
 } Relay_GamePanelTab;
 
 /** Zoom level used by Relay's graph workspace. */
@@ -43,6 +46,14 @@ typedef enum Relay_GameActionResult {
     RELAY_GAME_ACTION_CONNECTION_REJECTED
 } Relay_GameActionResult;
 
+/** Results produced by one completed editor command. */
+typedef enum Relay_GameEditorCommandResult {
+    RELAY_GAME_EDITOR_COMMAND_NONE,
+    RELAY_GAME_EDITOR_COMMAND_SAVED,
+    RELAY_GAME_EDITOR_COMMAND_CLOSED,
+    RELAY_GAME_EDITOR_COMMAND_FAILED
+} Relay_GameEditorCommandResult;
+
 /** One catalog entry that can instantiate a node definition. */
 typedef struct Relay_ShopOffer {
     Relay_NodeDefinitionId definition_id;
@@ -52,17 +63,99 @@ typedef struct Relay_ShopOffer {
 /** Game-owned state for source nodes, shop state, and currency. */
 typedef struct Relay_Game {
     Relay_NodeWorld nodes;
+    Relay_BlueprintLibrary blueprints;
+    Relay_ScriptRuntime *script_runtime;
     Relay_Currency currency;
     Relay_GamePanelTab active_tab;
     Relay_GameWorkspaceMode workspace_mode;
     size_t selected_offer;
+    size_t selected_blueprint;
     Relay_GameActionResult last_action;
     Relay_NodeId focused_node_id;
+    Relay_NodeId root_focused_node_id;
+    size_t active_workspace;
+    Relay_BlueprintId editing_blueprint_id;
     uint64_t simulation_tick;
 } Relay_Game;
 
 /** Initialize the node world and starting currency. */
-bool relay_game_init(Relay_Game *game);
+bool relay_game_init(Relay_Game *game, Relay_ScriptRuntime *script_runtime);
+
+/** Return the mutable graph shown in the active top-level workspace. */
+Relay_NodeWorld *relay_game_active_world(Relay_Game *game);
+
+/** Return the immutable graph shown in the active top-level workspace. */
+const Relay_NodeWorld *relay_game_active_world_const(const Relay_Game *game);
+
+/** Return the active blueprint, or NULL while the Relay root is active. */
+Relay_Blueprint *relay_game_active_blueprint(Relay_Game *game);
+
+/** Create and open a new top-level script blueprint. */
+bool relay_game_create_blueprint(Relay_Game *game);
+
+/** Move to the adjacent Relay/blueprint top-level workspace. */
+bool relay_game_switch_workspace(Relay_Game *game, int direction);
+
+/** Activate Relay or one currently open Blueprint workspace by registry index. */
+bool relay_game_activate_workspace(Relay_Game *game, size_t workspace_index);
+
+/** Open the selected Blueprint as a visible top-level workspace tab. */
+bool relay_game_open_selected_blueprint(Relay_Game *game);
+
+/** Close the active Blueprint tab without deleting its definition or scene. */
+bool relay_game_close_active_blueprint(Relay_Game *game);
+
+/** Add a compiled blueprint as a normal typed node in the active scene. */
+bool relay_game_add_blueprint(Relay_Game *game, Relay_BlueprintId blueprint_id);
+
+/** Open the active or focused blueprint in the code editor. */
+bool relay_game_open_editor(Relay_Game *game);
+
+/** Return the blueprint currently owned by the code editor. */
+Relay_Blueprint *relay_game_editing_blueprint(Relay_Game *game);
+
+/** Insert one ASCII code point at the editor cursor. */
+bool relay_game_editor_insert(Relay_Game *game, uint32_t character);
+
+/** Remove the character immediately before the editor cursor. */
+bool relay_game_editor_backspace(Relay_Game *game);
+
+/** Remove the character at the editor cursor. */
+bool relay_game_editor_delete(Relay_Game *game);
+
+/** Move the editor cursor horizontally by one character. */
+bool relay_game_editor_move_horizontal(Relay_Game *game, int direction);
+
+/** Move the editor cursor vertically while preserving its visual column. */
+bool relay_game_editor_move_vertical(Relay_Game *game, int direction);
+
+/** Move the editor cursor to the start or end of its current line. */
+bool relay_game_editor_move_line_boundary(Relay_Game *game, bool to_end);
+
+/** Enter insert mode at the current cursor. */
+bool relay_game_editor_enter_insert(Relay_Game *game);
+
+/** Enter Vim-style command mode with an empty command buffer. */
+bool relay_game_editor_enter_command(Relay_Game *game);
+
+/** Return insert or command mode to normal mode. */
+bool relay_game_editor_leave_mode(Relay_Game *game);
+
+/** Append one printable character to the active editor command. */
+bool relay_game_editor_command_insert(Relay_Game *game, uint32_t character);
+
+/** Remove the final character from the active editor command. */
+bool relay_game_editor_command_backspace(Relay_Game *game);
+
+/** Execute the active `:w`, `:q`, or `:wq` editor command. */
+Relay_GameEditorCommandResult relay_game_editor_command_execute(
+    Relay_Game *game);
+
+/** Compile and transactionally deploy the edited blueprint source. */
+bool relay_game_editor_save(Relay_Game *game);
+
+/** Select one right-panel tab by its stable enum value. */
+bool relay_game_select_panel_tab(Relay_Game *game, size_t tab_index);
 
 /** Handle one navigation or confirmation input. */
 Relay_GameActionResult relay_game_handle_input(Relay_Game *game,

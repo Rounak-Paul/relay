@@ -41,8 +41,8 @@ block the normal game loop. Use a main-thread completion queue plus
 ## Nodes and scripting
 
 Node definitions are immutable data schemas in `relay/node.h`; use stable
-numeric identifiers and dotted string keys so saves and the future scripting
-language do not depend on display labels. Add new gameplay data through a
+numeric identifiers and dotted string keys so saves and gameplay scripts do not
+depend on display labels. Add new gameplay data through a
 `Relay_NodeDefinition`, including script-visible property definitions, then
 create instances through `Relay_NodeWorld`. Do not expose mutable world arrays
 to scripts: use node IDs and `relay_node_property_get` or
@@ -50,14 +50,32 @@ to scripts: use node IDs and `relay_node_property_get` or
 
 `Relay_NodeWorld` is one executable module graph. Preserve its typed directed
 connection rule: one output may fan out, each input has one replaceable source,
-and compatibility is determined by the declared port value type. Future
-reusable and script-authored modules must compile to this same graph contract;
+and compatibility is determined by the declared port value type. Reusable and
+script-authored modules must compile to this same graph contract;
 do not create a parallel scripting-only wire format. Simulation runs at fixed
 gameplay ticks and must not be advanced by rendering or terminal input.
 
 Self-connections are valid when port schemas are compatible. Evaluate them
 through a previous-tick output snapshot so a feedback loop has deterministic,
 non-recursive gameplay semantics.
+
+Lua 5.5 is a private implementation dependency behind Relay-owned scripting
+APIs. Do not expose Lua types in public headers, open additional standard
+libraries, add arbitrary execution entry points, or let scripts access the
+filesystem, environment, process, host clock, network, terminal, logger, event
+bus, or mutable world storage. Gameplay scripts read immutable tick snapshots
+and enqueue capability-checked commands for deterministic commit. Authoritative
+gameplay values are integers, Booleans, strings, and bounded project-owned
+containers; floating-point values and unordered table iteration are forbidden.
+Source and project-owned typed persistent state are saved; Lua bytecode, stack
+frames, pointers, and VM tables are never authoritative.
+
+Blueprints are versioned reusable module definitions with typed ports,
+parameters, components, connections, programs, and layout. Nested blueprints
+must be cycle-checked and compiled into the same `Relay_NodeWorld` graph with
+instance/local-path provenance. Do not introduce an opaque blueprint simulator,
+parallel wire format, or script-only module graph. Follow the complete stage
+contracts and exit criteria in `docs/SCRIPTING_BLUEPRINT_ROADMAP.md`.
 
 ## Workspace rendering
 

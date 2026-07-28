@@ -1,0 +1,220 @@
+#include "relay/game.h"
+
+#include <string.h>
+
+/** Return one visible node matching a Blueprint or built-in definition. */
+static Relay_Node *relay_test_visible_node(Relay_NodeWorld *world,
+    Relay_NodeDefinitionId definition_id, Relay_BlueprintId blueprint_id)
+{
+    size_t index;
+
+    for (index = 0; index < world->count; index++) {
+        Relay_Node *node = &world->nodes[index];
+
+        if (node->module_instance_id == 0 &&
+            node->definition_id == definition_id &&
+            node->blueprint_id == blueprint_id) {
+            return node;
+        }
+    }
+    return NULL;
+}
+
+/** Verify nested visual port maps compile and execute as one typed module. */
+int relay_blueprint_test(void)
+{
+    static const char incompatible_source[] =
+        "input('coal', 'coal')\n"
+        "output('coal_out', 'coal')\n"
+        "function tick(inputs, state)\n"
+        "  return { coal_out = inputs.coal or 0 }\n"
+        "end\n";
+    Relay_ScriptRuntime scripts = {0};
+    Relay_Game game = {0};
+    Relay_Blueprint *child;
+    Relay_Blueprint *parent;
+    Relay_BlueprintId child_id;
+    Relay_BlueprintId parent_id;
+    Relay_NodeId child_component_id;
+    Relay_NodeId module_one_id;
+    Relay_NodeId module_two_id;
+    Relay_NodeWorld *root;
+    Relay_Node *miner;
+    Relay_Node *module_one;
+    Relay_Node *module_two;
+    Relay_Node *clock;
+    uint64_t deployed_revision;
+    size_t deployed_plan_nodes;
+    size_t output_connection_index = SIZE_MAX;
+    size_t index;
+    size_t initialized_cores = 0;
+
+    if (!relay_script_runtime_init(&scripts,
+            RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT) ||
+        !relay_game_init(&game, &scripts) ||
+        !relay_game_create_blueprint(&game)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    child = relay_game_active_blueprint(&game);
+    child_id = child == NULL ? 0 : child->id;
+    if (child == NULL || child->scene.count != 3 ||
+        child->input_boundary_node_id == 0 ||
+        child->script_core_node_id == 0 ||
+        child->output_boundary_node_id == 0 || !child->plan.valid ||
+        child->plan.node_count != 1 ||
+        child->plan.input_binding_count != 1 ||
+        child->plan.output_binding_count != 1 ||
+        !relay_game_create_blueprint(&game)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    parent = relay_game_active_blueprint(&game);
+    parent_id = parent == NULL ? 0 : parent->id;
+    if (parent == NULL || !relay_game_back(&game) ||
+        game.active_workspace != 0 ||
+        !relay_game_activate_workspace(&game, 2) ||
+        !relay_game_add_blueprint(&game, child_id)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    child_component_id = game.focused_node_id;
+    if (!relay_game_connect_nodes(&game, parent->input_boundary_node_id, 0,
+            child_component_id, 0) ||
+        !relay_game_connect_nodes(&game, child_component_id, 0,
+            parent->output_boundary_node_id, 0) ||
+        !parent->plan.valid || parent->plan.node_count != 2 ||
+        parent->plan.input_binding_count != 2 ||
+        parent->plan.output_binding_count != 1) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    if (!relay_game_connect_nodes(&game, parent->input_boundary_node_id, 0,
+            parent->output_boundary_node_id, 0) ||
+        !parent->plan.output_bindings[0].source_is_module_input ||
+        parent->plan.output_bindings[0].source_module_input_port_index != 0 ||
+        !relay_game_connect_nodes(&game, child_component_id, 0,
+            parent->output_boundary_node_id, 0) ||
+        parent->plan.output_bindings[0].source_is_module_input) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    deployed_plan_nodes = parent->plan.node_count;
+    for (index = 0; index < parent->scene.connection_count; index++) {
+        if (parent->scene.connections[index].destination_node_id ==
+                parent->output_boundary_node_id) {
+            output_connection_index = index;
+            break;
+        }
+    }
+    if (output_connection_index == SIZE_MAX) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    parent->scene.connections[
+        output_connection_index].destination_node_id =
+        parent->script_core_node_id;
+    if (relay_blueprint_rebuild_plan(&game.blueprints, parent) ||
+        !parent->plan.valid || parent->plan.node_count != deployed_plan_nodes) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    parent->scene.connections[
+        output_connection_index].destination_node_id =
+        parent->output_boundary_node_id;
+    if (!relay_blueprint_rebuild_plan(&game.blueprints, parent) ||
+        !relay_game_activate_workspace(&game, 1)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    {
+        const size_t child_scene_count = child->scene.count;
+        const Relay_NodeId child_scene_next_id = child->scene.next_id;
+
+        if (relay_game_add_blueprint(&game, parent_id) ||
+            child->scene.count != child_scene_count ||
+            child->scene.next_id != child_scene_next_id) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
+    if (!relay_game_activate_workspace(&game, 0) ||
+        !relay_game_add_blueprint(&game, parent_id) ||
+        (module_one_id = game.focused_node_id) == 0 ||
+        !relay_game_add_blueprint(&game, parent_id) ||
+        (module_two_id = game.focused_node_id) == 0 ||
+        module_one_id == module_two_id ||
+        !relay_game_select_panel_tab(&game, RELAY_GAME_PANEL_TAB_SHOP) ||
+        relay_game_handle_input(&game, RELAY_GAME_INPUT_CONFIRM) !=
+            RELAY_GAME_ACTION_PURCHASED) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    root = &game.nodes;
+    miner = relay_test_visible_node(root, RELAY_NODE_DEFINITION_COAL_MINER, 0);
+    module_one = relay_node_world_find(root, module_one_id);
+    module_two = relay_node_world_find(root, module_two_id);
+    clock = relay_test_visible_node(root, RELAY_NODE_DEFINITION_CLOCK, 0);
+    if (miner == NULL || module_one == NULL || module_two == NULL ||
+        clock == NULL || root->module_input_binding_count != 4 ||
+        root->module_output_binding_count != 2 ||
+        relay_game_connect_nodes(&game, miner->id, 0, module_one->id, 0) ||
+        !relay_game_connect_nodes(&game, clock->id, 0, module_one->id, 0) ||
+        !relay_game_connect_nodes(&game, clock->id, 0, module_two->id, 0) ||
+        !relay_game_connect_nodes(&game, module_one->id, 0, miner->id, 0) ||
+        !relay_game_connect_nodes(&game, miner->id, 0, miner->id, 1)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    for (index = 0; index < 48; index++) {
+        if (!relay_game_step(&game)) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
+    for (index = 0; index < root->count; index++) {
+        if ((root->nodes[index].module_instance_id == module_one->id ||
+                root->nodes[index].module_instance_id == module_two->id) &&
+            root->nodes[index].runtime_kind ==
+                RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE &&
+            root->nodes[index].script_state.initialized) {
+            initialized_cores++;
+        }
+    }
+    if (miner->produced < 1 || initialized_cores != 4) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+
+    deployed_revision = parent->compiled_revision;
+    (void)memcpy(parent->source, incompatible_source,
+        sizeof(incompatible_source));
+    parent->source_size = sizeof(incompatible_source) - 1;
+    parent->cursor = parent->source_size;
+    parent->revision++;
+    parent->dirty = true;
+    if (relay_blueprint_compile(&game.blueprints, parent) ||
+        parent->compiled_revision != deployed_revision ||
+        !parent->artifact.installed || !parent->dirty ||
+        strstr(parent->diagnostic.message, "ports") == NULL) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    relay_game_shutdown(&game);
+    relay_script_runtime_shutdown(&scripts);
+    return relay_script_runtime_memory_used(&scripts) == 0 ? 0 : 1;
+}

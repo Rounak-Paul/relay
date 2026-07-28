@@ -16,9 +16,16 @@ typedef enum Relay_TerminalKey {
     RELAY_TERMINAL_KEY_NONE,
     RELAY_TERMINAL_KEY_UP,
     RELAY_TERMINAL_KEY_DOWN,
+    RELAY_TERMINAL_KEY_LEFT,
+    RELAY_TERMINAL_KEY_RIGHT,
     RELAY_TERMINAL_KEY_TAB,
     RELAY_TERMINAL_KEY_CONFIRM,
-    RELAY_TERMINAL_KEY_ESCAPE
+    RELAY_TERMINAL_KEY_ESCAPE,
+    RELAY_TERMINAL_KEY_BACKSPACE,
+    RELAY_TERMINAL_KEY_DELETE,
+    RELAY_TERMINAL_KEY_HOME,
+    RELAY_TERMINAL_KEY_END,
+    RELAY_TERMINAL_KEY_SAVE
 } Relay_TerminalKey;
 
 /** Center-screen terminal overlay states owned by the application. */
@@ -43,7 +50,8 @@ typedef struct Relay_TerminalEvent {
     uint32_t character;
     int mouse_x;
     int mouse_y;
-    bool panel_tab_clicked;
+    size_t panel_tab_index_plus_one;
+    size_t workspace_tab_index_plus_one;
     uint64_t selected_node_id;
     uint64_t dragged_node_id;
     int grid_delta_x;

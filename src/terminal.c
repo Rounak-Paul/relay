@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 enum {
     RELAY_TERMINAL_MIN_GAME_WIDTH = 12,
@@ -38,6 +39,75 @@ typedef struct Relay_TerminalPoint {
     int x;
     int y;
 } Relay_TerminalPoint;
+
+/** Derived line/column window for rendering the active code editor. */
+typedef struct Relay_TerminalEditorView {
+    size_t first_line;
+    size_t first_column;
+    size_t cursor_line;
+    size_t cursor_column;
+} Relay_TerminalEditorView;
+
+/** Calculate a cursor-centered editor viewport without mutating game state. */
+static Relay_TerminalEditorView relay_terminal_editor_view(
+    const Relay_Blueprint *blueprint, size_t visible_lines,
+    size_t visible_columns)
+{
+    Relay_TerminalEditorView view = {0};
+    size_t index;
+    size_t line_start = 0;
+
+    for (index = 0; index < blueprint->cursor; index++) {
+        if (blueprint->source[index] == '\n') {
+            view.cursor_line++;
+            line_start = index + 1;
+        }
+    }
+    view.cursor_column = blueprint->cursor - line_start;
+    if (visible_lines > 0 && view.cursor_line >= visible_lines) {
+        view.first_line = view.cursor_line - visible_lines + 1;
+    }
+    if (visible_columns > 0 && view.cursor_column >= visible_columns) {
+        view.first_column = view.cursor_column - visible_columns + 1;
+    }
+    return view;
+}
+
+/** Return the source byte range occupied by a numbered editor line. */
+static bool relay_terminal_editor_line(const Relay_Blueprint *blueprint,
+    size_t target_line, size_t *start, size_t *length)
+{
+    size_t line = 0;
+    size_t index = 0;
+
+    while (line < target_line && index < blueprint->source_size) {
+        if (blueprint->source[index++] == '\n') {
+            line++;
+        }
+    }
+    if (line != target_line || index > blueprint->source_size) {
+        return false;
+    }
+    *start = index;
+    while (index < blueprint->source_size &&
+        blueprint->source[index] != '\n') {
+        index++;
+    }
+    *length = index - *start;
+    return true;
+}
+
+/** Return the compact player-facing label for one editor mode. */
+static const char *relay_terminal_editor_mode_label(
+    Relay_BlueprintEditorMode mode)
+{
+    switch (mode) {
+    case RELAY_BLUEPRINT_EDITOR_NORMAL: return "NORMAL";
+    case RELAY_BLUEPRINT_EDITOR_INSERT: return "INSERT";
+    case RELAY_BLUEPRINT_EDITOR_COMMAND: return "COMMAND";
+    }
+    return "UNKNOWN";
+}
 
 /** Fully resolved directional path shared by persistent and live wires. */
 typedef struct Relay_TerminalWirePath {
@@ -164,6 +234,12 @@ static int64_t relay_terminal_add_delta(int64_t coordinate, int64_t delta)
     return coordinate + delta;
 }
 
+/** Return whether a node belongs on the current collapsed graph surface. */
+static bool relay_terminal_node_is_visible(const Relay_Node *node)
+{
+    return node != NULL && node->module_instance_id == 0;
+}
+
 /** Resolve one graph connection into an orthogonal terminal-space wire route. */
 static bool relay_terminal_wire_route(const Relay_Game *game,
     const Relay_Terminal *terminal, const Relay_NodeConnection *connection,
@@ -179,12 +255,15 @@ static bool relay_terminal_wire_route(const Relay_Game *game,
     if (game == NULL || terminal == NULL || connection == NULL || route == NULL) {
         return false;
     }
-    source = relay_node_world_find_const(&game->nodes, connection->source_node_id);
-    destination = relay_node_world_find_const(&game->nodes,
+    source = relay_node_world_find_const(relay_game_active_world_const(game),
+        connection->source_node_id);
+    destination = relay_node_world_find_const(relay_game_active_world_const(game),
         connection->destination_node_id);
     source_card = relay_node_renderer_card(source);
     destination_card = relay_node_renderer_card(destination);
-    if (source == NULL || destination == NULL || source_card.definition == NULL ||
+    if (!relay_terminal_node_is_visible(source) ||
+        !relay_terminal_node_is_visible(destination) ||
+        source_card.definition == NULL ||
         destination_card.definition == NULL ||
         connection->source_port_index >= source_card.definition->output_count ||
         connection->destination_port_index >= destination_card.definition->input_count) {
@@ -226,7 +305,8 @@ static bool relay_terminal_output_anchor(const Relay_Game *game,
     if (game == NULL || terminal == NULL || x == NULL || y == NULL) {
         return false;
     }
-    node = relay_node_world_find_const(&game->nodes, node_id);
+    node = relay_node_world_find_const(relay_game_active_world_const(game),
+        node_id);
     card = relay_node_renderer_card(node);
     if (node == NULL || card.definition == NULL ||
         port_index >= card.definition->output_count) {
@@ -250,7 +330,8 @@ static bool relay_terminal_input_anchor(const Relay_Game *game,
     if (game == NULL || terminal == NULL || x == NULL || y == NULL) {
         return false;
     }
-    node = relay_node_world_find_const(&game->nodes, node_id);
+    node = relay_node_world_find_const(relay_game_active_world_const(game),
+        node_id);
     card = relay_node_renderer_card(node);
     if (node == NULL || card.definition == NULL ||
         port_index >= card.definition->input_count) {
@@ -286,19 +367,66 @@ static bool relay_terminal_split(int width, int height, int *divider_x)
     return true;
 }
 
-/** Return whether a terminal coordinate targets the right-panel tab strip. */
-static bool relay_terminal_panel_tab_at(int width, int height, int mouse_x,
+/** Return the one-based right-panel tab index at a terminal coordinate. */
+static size_t relay_terminal_panel_tab_at(int width, int height, int mouse_x,
     int mouse_y)
 {
     int divider_x;
+    int offset;
 
-    return relay_terminal_split(width, height, &divider_x) && mouse_y == 1 &&
-        mouse_x >= divider_x + 2 && mouse_x < width;
+    if (!relay_terminal_split(width, height, &divider_x) || mouse_y != 1) {
+        return 0;
+    }
+    offset = mouse_x - (divider_x + 2);
+    if (offset >= 0 && offset <= 5) {
+        return 1;
+    }
+    if (offset >= 7 && offset <= 15) {
+        return 2;
+    }
+    if (offset >= 17 && offset <= 25) {
+        return 3;
+    }
+    return 0;
+}
+
+/** Return the encoded workspace index under one top-tab mouse coordinate. */
+static size_t relay_terminal_workspace_tab_at(const Relay_Game *game,
+    int width, int height, int mouse_x, int mouse_y)
+{
+    int divider_x;
+    int tab_x = 1;
+    size_t index;
+    size_t tab_width = strlen("Relay") + 2;
+
+    if (game == NULL || mouse_y != 0 ||
+        !relay_terminal_split(width, height, &divider_x)) {
+        return 0;
+    }
+    if (mouse_x >= tab_x && mouse_x < tab_x + (int)tab_width) {
+        return 1;
+    }
+    tab_x += (int)tab_width + 1;
+    for (index = 0; index < game->blueprints.count; index++) {
+        const Relay_Blueprint *blueprint = &game->blueprints.blueprints[index];
+
+        if (!blueprint->workspace_open) {
+            continue;
+        }
+        tab_width = strlen(blueprint->name) + 2;
+        if (tab_x >= divider_x) {
+            break;
+        }
+        if (mouse_x >= tab_x && mouse_x < tab_x + (int)tab_width) {
+            return index + 2;
+        }
+        tab_x += (int)tab_width + 1;
+    }
+    return 0;
 }
 
 #if RELAY_PLATFORM_WINDOWS
 #include <stdio.h>
-#include <string.h>
 
 /** Write a string to the active Windows console. */
 static bool relay_terminal_write(HANDLE output, const char *text)
@@ -320,6 +448,57 @@ static bool relay_terminal_write_at(HANDLE output, int x, int y,
 
     return length > 0 && (size_t)length < sizeof(sequence) &&
         relay_terminal_write(output, sequence);
+}
+
+/** Draw Relay and every open Blueprint as persistent Windows workspace tabs. */
+static bool relay_terminal_draw_workspace_tabs(HANDLE output, int divider_x,
+    const Relay_Game *game)
+{
+    int tab_x = 1;
+    size_t index;
+    char text[96];
+
+    if (!relay_terminal_write_at(output, tab_x, 0,
+            game->active_workspace == 0 ?
+                "\x1b[1;36m[Relay]\x1b[0m" : "[Relay]")) {
+        return false;
+    }
+    tab_x += (int)strlen("Relay") + 3;
+    for (index = 0; index < game->blueprints.count; index++) {
+        const Relay_Blueprint *blueprint = &game->blueprints.blueprints[index];
+        const int tab_width = (int)strlen(blueprint->name) + 2;
+
+        if (!blueprint->workspace_open) {
+            continue;
+        }
+        if (tab_x + tab_width > divider_x) {
+            break;
+        }
+        (void)snprintf(text, sizeof(text),
+            game->active_workspace == index + 1 ?
+                "\x1b[1;36m[%s]\x1b[0m" : "[%s]", blueprint->name);
+        if (!relay_terminal_write_at(output, tab_x, 0, text)) {
+            return false;
+        }
+        tab_x += tab_width + 1;
+    }
+    return true;
+}
+
+/** Return an ANSI-colored port glyph from the renderer-owned visual token. */
+static const char *relay_terminal_port_glyph(Relay_NodePortType type)
+{
+    switch (relay_node_renderer_port_visual(type).color) {
+    case 3: return "\x1b[1;36m●\x1b[0m";
+    case 1: return "\x1b[1;33m●\x1b[0m";
+    case 2: return "\x1b[1;37m●\x1b[0m";
+    case 6: return "\x1b[1;31m●\x1b[0m";
+    case 4: return "\x1b[2;37m●\x1b[0m";
+    case 5: return "\x1b[1;35m●\x1b[0m";
+    case 7: return "\x1b[1;34m●\x1b[0m";
+    case 8: return "\x1b[1;32m●\x1b[0m";
+    default: return "\x1b[1;31m?\x1b[0m";
+    }
 }
 
 /** Draw the pan-aware dot grid behind Relay's graph workspace. */
@@ -418,12 +597,14 @@ static bool relay_terminal_draw_wires(HANDLE output, const Relay_Game *game,
 {
     size_t index;
 
-    for (index = 0; index < game->nodes.connection_count; index++) {
+    for (index = 0; index <
+            relay_game_active_world_const(game)->connection_count; index++) {
         Relay_TerminalWireRoute route;
         Relay_TerminalWirePath path;
 
         if (relay_terminal_wire_route(game, terminal,
-                &game->nodes.connections[index], &route)) {
+                &relay_game_active_world_const(game)->connections[index],
+                &route)) {
             relay_terminal_wire_path_create(route.source_x, route.source_y,
                 route.source_top, route.source_bottom, route.destination_x,
                 route.destination_y, route.destination_top, route.destination_bottom,
@@ -434,7 +615,8 @@ static bool relay_terminal_draw_wires(HANDLE output, const Relay_Game *game,
         }
     }
     if (terminal->wiring) {
-        const Relay_Node *source = relay_node_world_find_const(&game->nodes,
+        const Relay_Node *source = relay_node_world_find_const(
+            relay_game_active_world_const(game),
             terminal->wiring_source_node_id);
         const Relay_NodeRenderCard card = relay_node_renderer_card(source);
         Relay_TerminalWirePath path;
@@ -506,6 +688,13 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
         if (!relay_terminal_write_at(output, x, y + 3 + (int)row, line)) {
             return false;
         }
+        if ((input != NULL && !relay_terminal_write_at(output, x,
+                y + 3 + (int)row, relay_terminal_port_glyph(input->type))) ||
+            (output != NULL && !relay_terminal_write_at(output,
+                x + card.width - 1, y + 3 + (int)row,
+                relay_terminal_port_glyph(output->type)))) {
+            return false;
+        }
     }
     if (node->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
         const int filled = (int)(node->progress * 10 / 16);
@@ -513,9 +702,23 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
         (void)snprintf(content, sizeof(content), "F%lld [%.*s%.*s] %2lld/16",
             (long long)node->fuel_coal, filled, "##########", 10 - filled,
             "..........", (long long)node->progress);
-    } else {
+    } else if (node->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
         (void)snprintf(content, sizeof(content), "period: %lld",
             (long long)node->clock_period);
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
+        (void)snprintf(content, sizeof(content), "public interface");
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
+        (void)snprintf(content, sizeof(content), "public interface");
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+        (void)snprintf(content, sizeof(content), "Lua process");
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER) {
+        (void)snprintf(content, sizeof(content), "module instance");
+    } else {
+        (void)snprintf(content, sizeof(content), "enabled");
     }
     (void)snprintf(line, sizeof(line), "│ %-22.22s │", content);
     if (!relay_terminal_write_at(output, x, y + card.height - 2, line)) {
@@ -544,6 +747,61 @@ static bool relay_terminal_draw_node_map(HANDLE output, const Relay_Node *node,
     return relay_terminal_write_at(output, x, y, line);
 }
 
+/** Draw the active blueprint source editor in the Windows console backend. */
+static bool relay_terminal_draw_editor(HANDLE output, int divider_x, int height,
+    const Relay_Blueprint *blueprint)
+{
+    const size_t visible_lines = height > 4 ? (size_t)(height - 4) : 0;
+    const size_t text_capacity = divider_x > 9 ?
+        (size_t)(divider_x - 9) : 0;
+    const Relay_TerminalEditorView view = relay_terminal_editor_view(blueprint,
+        visible_lines, text_capacity);
+    size_t row;
+
+    for (row = 0; row < visible_lines; row++) {
+        const size_t line_number = view.first_line + row;
+        size_t start;
+        size_t length;
+        char line[192];
+
+        if (!relay_terminal_editor_line(blueprint, line_number, &start,
+                &length)) {
+            break;
+        }
+        if (view.first_column < length) {
+            start += view.first_column;
+            length -= view.first_column;
+        } else {
+            length = 0;
+        }
+        if (length > text_capacity) {
+            length = text_capacity;
+        }
+        (void)snprintf(line, sizeof(line), "\x1b[2m%4zu\x1b[0m │ %-.*s",
+            line_number + 1, (int)length, &blueprint->source[start]);
+        if (!relay_terminal_write_at(output, 1, 2 + (int)row, line)) {
+            return false;
+        }
+    }
+    if (view.cursor_line >= view.first_line &&
+        view.cursor_line < view.first_line + visible_lines) {
+        const int cursor_x = 8 +
+            (int)(view.cursor_column - view.first_column);
+        const int cursor_y = 2 + (int)(view.cursor_line - view.first_line);
+        char cursor[32];
+        const char character = blueprint->cursor < blueprint->source_size &&
+            blueprint->source[blueprint->cursor] != '\n' ?
+            blueprint->source[blueprint->cursor] : ' ';
+
+        (void)snprintf(cursor, sizeof(cursor), "\x1b[7m%c\x1b[0m", character);
+        if (cursor_x < divider_x &&
+            !relay_terminal_write_at(output, cursor_x, cursor_y, cursor)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /** Render Relay's tabbed graph workspace and right-side control panel. */
 static bool relay_terminal_draw_split(HANDLE output, int width, int height,
     const Relay_Game *game, const Relay_Terminal *terminal)
@@ -553,6 +811,9 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
     char line[64];
     size_t index;
     const Relay_Node *focused;
+    const Relay_Blueprint *editing = game->editing_blueprint_id == 0 ? NULL :
+        relay_blueprint_library_find_const(&game->blueprints,
+            game->editing_blueprint_id);
 
     if (!relay_terminal_split(width, height, &divider_x)) {
         return relay_terminal_write_at(output, 0, 0,
@@ -563,20 +824,24 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
             return false;
         }
     }
-    if (!relay_terminal_write_at(output, 1, 0,
-            game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
-                "\x1b[1;36m[ Relay ]  MAP\x1b[0m" :
-                "\x1b[1;36m[ Relay ]\x1b[0m") ||
+    if (!relay_terminal_draw_workspace_tabs(output, divider_x, game) ||
         !relay_terminal_write_at(output, divider_x + 2, 1,
+            editing != NULL ? "\x1b[1;36m[ CODE ]\x1b[0m" :
             game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
-                "\x1b[1;36m[ SHOP ]\x1b[0m  [ Inspect ]" :
-                "[ Shop ]  \x1b[1;36m[ INSPECT ]\x1b[0m")) {
+                "\x1b[1;36m[SHOP]\x1b[0m [Inspect] [Scripts]" :
+            game->active_tab == RELAY_GAME_PANEL_TAB_INSPECTOR ?
+                "[Shop] \x1b[1;36m[INSPECT]\x1b[0m [Scripts]" :
+                "[Shop] [Inspect] \x1b[1;36m[SCRIPTS]\x1b[0m")) {
         return false;
     }
-    if (!relay_terminal_draw_grid(output, divider_x, height, terminal)) {
+    if (editing != NULL) {
+        if (!relay_terminal_draw_editor(output, divider_x, height, editing)) {
+            return false;
+        }
+    } else if (!relay_terminal_draw_grid(output, divider_x, height, terminal)) {
         return false;
     }
-    if (game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH &&
+    if (editing == NULL && game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH &&
         !relay_terminal_draw_wires(output, game, terminal, divider_x, height)) {
         return false;
     }
@@ -584,11 +849,36 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
     if (!relay_terminal_write_at(output, divider_x + 2, 3, line)) {
         return false;
     }
-    (void)snprintf(line, sizeof(line), "wires: %zu", game->nodes.connection_count);
+    (void)snprintf(line, sizeof(line), "wires: %zu",
+        relay_game_active_world_const(game)->connection_count);
     if (!relay_terminal_write_at(output, divider_x + 2, 4, line)) {
         return false;
     }
-    if (game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
+    if (editing != NULL) {
+        (void)snprintf(line, sizeof(line), "revision: %llu%s",
+            (unsigned long long)editing->revision,
+            editing->dirty ? "  modified" : "");
+        if (!relay_terminal_write_at(output, divider_x + 2, 3, line)) {
+            return false;
+        }
+        (void)snprintf(line, sizeof(line), "mode: %s",
+            relay_terminal_editor_mode_label(editing->editor_mode));
+        if (!relay_terminal_write_at(output, divider_x + 2, 4, line)) {
+            return false;
+        }
+        (void)snprintf(line, sizeof(line), "%.36s",
+            editing->diagnostic.message);
+        if (!relay_terminal_write_at(output, divider_x + 2, 5, line)) {
+            return false;
+        }
+        if (editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND) {
+            (void)snprintf(line, sizeof(line), ":%s",
+                editing->editor_command);
+            if (!relay_terminal_write_at(output, divider_x + 2, 7, line)) {
+                return false;
+            }
+        }
+    } else if (game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
         for (index = 0; index < relay_game_shop_offer_count() &&
             6 + (int)index < height - 2; index++) {
             const Relay_ShopOffer *offer = relay_game_shop_offer_at(index);
@@ -600,16 +890,17 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
                 return false;
             }
         }
-    } else {
-        focused = relay_node_world_find_const(&game->nodes, game->focused_node_id);
+    } else if (game->active_tab == RELAY_GAME_PANEL_TAB_INSPECTOR) {
+        focused = relay_node_world_find_const(relay_game_active_world_const(game),
+            game->focused_node_id);
         if (focused == NULL) {
             if (!relay_terminal_write_at(output, divider_x + 2, 6,
                     "No node selected.")) {
                 return false;
             }
         } else {
-            const Relay_NodeDefinition *definition = relay_node_definition_find(
-                focused->definition_id);
+            const Relay_NodeDefinition *definition =
+                relay_node_definition_for(focused);
 
             if (definition == NULL) {
                 return false;
@@ -649,11 +940,82 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
                 if (!relay_terminal_write_at(output, divider_x + 2, 10, line)) {
                     return false;
                 }
+            } else if (focused->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
+                if (!relay_terminal_write_at(output, divider_x + 2, 9,
+                        "Public module inputs") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 10,
+                        "Wire outputs to components.") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 12,
+                        "VHDL: entity input ports")) {
+                    return false;
+                }
+            } else if (focused->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
+                if (!relay_terminal_write_at(output, divider_x + 2, 9,
+                        "Public module outputs") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 10,
+                        "Wire components into inputs.") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 12,
+                        "VHDL: entity output ports")) {
+                    return false;
+                }
+            } else if (focused->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+                if (!relay_terminal_write_at(output, divider_x + 2, 9,
+                        "Player Lua process") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 10,
+                        "Ports mirror this module.") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 12,
+                        "E: edit source")) {
+                    return false;
+                }
+            } else if (focused->blueprint_id != 0) {
+                const Relay_Blueprint *blueprint =
+                    relay_blueprint_library_find_const(&game->blueprints,
+                        focused->blueprint_id);
+
+                if (blueprint != NULL) {
+                    (void)snprintf(line, sizeof(line), "key: %s",
+                        blueprint->key);
+                    if (!relay_terminal_write_at(output, divider_x + 2, 9,
+                            line)) {
+                        return false;
+                    }
+                    (void)snprintf(line, sizeof(line), "revision: %llu",
+                        (unsigned long long)blueprint->compiled_revision);
+                    if (!relay_terminal_write_at(output, divider_x + 2, 10,
+                            line) ||
+                        !relay_terminal_write_at(output, divider_x + 2, 12,
+                            "Reusable module instance") ||
+                        !relay_terminal_write_at(output, divider_x + 2, 13,
+                            "E: edit source")) {
+                        return false;
+                    }
+                }
+            }
+        }
+    } else {
+        for (index = 0; index < game->blueprints.count &&
+            6 + (int)index < height - 2; index++) {
+            const Relay_Blueprint *blueprint =
+                &game->blueprints.blueprints[index];
+
+            (void)snprintf(line, sizeof(line), "%c %s",
+                index == game->selected_blueprint ? '>' : ' ', blueprint->name);
+            if (!relay_terminal_write_at(output, divider_x + 2,
+                    6 + (int)index, line)) {
+                return false;
             }
         }
     }
-    for (index = 0; index < game->nodes.count; index++) {
-        const Relay_Node *node = &game->nodes.nodes[index];
+    for (index = 0; editing == NULL &&
+        index < relay_game_active_world_const(game)->count; index++) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index];
+        if (!relay_terminal_node_is_visible(node)) {
+            continue;
+        }
         if ((game->workspace_mode == RELAY_GAME_WORKSPACE_MAP &&
                 !relay_terminal_draw_node_map(output, node, terminal, divider_x,
                     height)) ||
@@ -664,9 +1026,29 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
         }
     }
     return relay_terminal_write_at(output, divider_x + 2, height - 3,
-        "Tab: panel") && relay_terminal_write_at(output, divider_x + 2,
-            height - 2, game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
-                "j/k: select  Enter: buy" : "click a title to inspect");
+        editing != NULL &&
+            editing->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT ?
+                "INSERT  Esc: normal" :
+        editing != NULL &&
+            editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
+                ":w deploy  :wq deploy/back" :
+        editing != NULL ? "NORMAL  i/a/o insert  : command" :
+            "N:new ,/.:tab C:close E:edit") &&
+        relay_terminal_write_at(output, divider_x + 2, height - 2,
+            editing != NULL &&
+                editing->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT ?
+                    "type/edit  Enter newline" :
+            editing != NULL &&
+                editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
+                    "Enter: run  Esc: cancel" :
+            editing != NULL ? "hjkl move  x delete  Esc back" :
+            game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
+                "j/k: select  Enter: buy" :
+            game->active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS ?
+                "j/k pick  O:open  Enter:add" :
+            game->active_workspace != 0 ?
+                "Inputs -> components -> Outputs" :
+                "click a title to inspect");
 }
 
 bool relay_terminal_init(Relay_Terminal *terminal)
@@ -750,7 +1132,8 @@ void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
     if (!relay_terminal_split(width, height, &divider_x)) {
         return;
     }
-    node = relay_node_world_find_const(&game->nodes, node_id);
+    node = relay_node_world_find_const(relay_game_active_world_const(game),
+        node_id);
     if (node == NULL) {
         return;
     }
@@ -782,13 +1165,16 @@ static Relay_NodeId relay_terminal_node_at(const Relay_Game *game,
         mouse_x >= divider_x || mouse_y < 2) {
         return 0;
     }
-    for (index = game->nodes.count; index > 0; index--) {
-        const Relay_Node *node = &game->nodes.nodes[index - 1];
+    for (index = relay_game_active_world_const(game)->count; index > 0;
+            index--) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index - 1];
         const Relay_NodeRenderCard card = relay_node_renderer_card(node);
         const int x = 2 + node->grid_x + terminal->grid_offset_x;
         const int y = 3 + node->grid_y + terminal->grid_offset_y;
 
-        if (mouse_x > x && mouse_x < x + card.width - 1 &&
+        if (relay_terminal_node_is_visible(node) &&
+            mouse_x > x && mouse_x < x + card.width - 1 &&
             mouse_y == y + 1) {
             return node->id;
         }
@@ -815,19 +1201,23 @@ static Relay_TerminalPortHit relay_terminal_port_at(const Relay_Game *game,
     if (!relay_terminal_split(width, height, &divider_x)) {
         return (Relay_TerminalPortHit){0};
     }
-    for (index = game->nodes.count; index > 0; index--) {
-        const Relay_Node *node = &game->nodes.nodes[index - 1];
+    for (index = relay_game_active_world_const(game)->count; index > 0;
+            index--) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index - 1];
         const Relay_NodeRenderCard card = relay_node_renderer_card(node);
         const int x = 2 + node->grid_x + terminal->grid_offset_x;
         const int y = 3 + node->grid_y + terminal->grid_offset_y;
         const int row = mouse_y - (y + 3);
 
-        if (card.definition != NULL && row >= 0 &&
+        if (relay_terminal_node_is_visible(node) &&
+            card.definition != NULL && row >= 0 &&
             row < (int)card.definition->input_count && mouse_x >= x &&
             mouse_x < x + card.width / 2) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, false};
         }
-        if (card.definition != NULL && row >= 0 &&
+        if (relay_terminal_node_is_visible(node) &&
+            card.definition != NULL && row >= 0 &&
             row < (int)card.definition->output_count && mouse_x >=
             x + card.width / 2 && mouse_x < x + card.width) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, true};
@@ -864,12 +1254,28 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
             event->key = RELAY_TERMINAL_KEY_UP;
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_DOWN) {
             event->key = RELAY_TERMINAL_KEY_DOWN;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_LEFT) {
+            event->key = RELAY_TERMINAL_KEY_LEFT;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_RIGHT) {
+            event->key = RELAY_TERMINAL_KEY_RIGHT;
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_TAB) {
             event->key = RELAY_TERMINAL_KEY_TAB;
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) {
             event->key = RELAY_TERMINAL_KEY_CONFIRM;
         } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
             event->key = RELAY_TERMINAL_KEY_ESCAPE;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_BACK) {
+            event->key = RELAY_TERMINAL_KEY_BACKSPACE;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_DELETE) {
+            event->key = RELAY_TERMINAL_KEY_DELETE;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_HOME) {
+            event->key = RELAY_TERMINAL_KEY_HOME;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == VK_END) {
+            event->key = RELAY_TERMINAL_KEY_END;
+        } else if (record.Event.KeyEvent.wVirtualKeyCode == 'S' &&
+            (record.Event.KeyEvent.dwControlKeyState &
+                (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0) {
+            event->key = RELAY_TERMINAL_KEY_SAVE;
         }
     } else if (record.EventType == MOUSE_EVENT) {
         const MOUSE_EVENT_RECORD *mouse = &record.Event.MouseEvent;
@@ -880,11 +1286,30 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
         event->mouse_y = mouse->dwMousePosition.Y;
         if (left_down && !terminal->dragging_grid && !terminal->dragging_node &&
             !terminal->wiring && GetConsoleScreenBufferInfo(terminal->output,
+                &information) && relay_terminal_workspace_tab_at(game,
+                information.srWindow.Right - information.srWindow.Left + 1,
+                information.srWindow.Bottom - information.srWindow.Top + 1,
+                event->mouse_x, event->mouse_y) != 0) {
+            event->workspace_tab_index_plus_one =
+                relay_terminal_workspace_tab_at(game,
+                    information.srWindow.Right - information.srWindow.Left + 1,
+                    information.srWindow.Bottom - information.srWindow.Top + 1,
+                    event->mouse_x, event->mouse_y);
+            return true;
+        }
+        if (game->editing_blueprint_id != 0) {
+            return true;
+        }
+        if (left_down && !terminal->dragging_grid && !terminal->dragging_node &&
+            !terminal->wiring && GetConsoleScreenBufferInfo(terminal->output,
                 &information) && relay_terminal_panel_tab_at(
                 information.srWindow.Right - information.srWindow.Left + 1,
                 information.srWindow.Bottom - information.srWindow.Top + 1,
                 event->mouse_x, event->mouse_y)) {
-            event->panel_tab_clicked = true;
+            event->panel_tab_index_plus_one = relay_terminal_panel_tab_at(
+                information.srWindow.Right - information.srWindow.Left + 1,
+                information.srWindow.Bottom - information.srWindow.Top + 1,
+                event->mouse_x, event->mouse_y);
             return true;
         } else if (left_down && !terminal->dragging_grid &&
             !terminal->dragging_node && !terminal->wiring) {
@@ -1004,6 +1429,22 @@ static uintattr_t relay_terminal_node_color(unsigned int color)
     }
 }
 
+/** Convert a renderer-owned fixed port visual into a Termbox foreground color. */
+static uintattr_t relay_terminal_port_color(Relay_NodePortType type)
+{
+    switch (relay_node_renderer_port_visual(type).color) {
+    case 3: return TB_CYAN | TB_BOLD;
+    case 1: return TB_YELLOW | TB_BOLD;
+    case 2: return TB_WHITE | TB_BOLD;
+    case 6: return TB_RED | TB_BOLD;
+    case 4: return TB_WHITE | TB_DIM;
+    case 5: return TB_MAGENTA | TB_BOLD;
+    case 7: return TB_BLUE | TB_BOLD;
+    case 8: return TB_GREEN | TB_BOLD;
+    default: return TB_RED | TB_BOLD;
+    }
+}
+
 /** Draw the pan-aware dot grid behind Relay's graph workspace. */
 static void relay_terminal_draw_grid(int divider_x, int height,
     const Relay_Terminal *terminal)
@@ -1082,12 +1523,14 @@ static void relay_terminal_draw_shared_wires(const Relay_Game *game,
 {
     size_t index;
 
-    for (index = 0; index < game->nodes.connection_count; index++) {
+    for (index = 0; index <
+            relay_game_active_world_const(game)->connection_count; index++) {
         Relay_TerminalWireRoute route;
         Relay_TerminalWirePath path;
 
         if (relay_terminal_wire_route(game, terminal,
-                &game->nodes.connections[index], &route)) {
+                &relay_game_active_world_const(game)->connections[index],
+                &route)) {
             relay_terminal_wire_path_create(route.source_x, route.source_y,
                 route.source_top, route.source_bottom, route.destination_x,
                 route.destination_y, route.destination_top, route.destination_bottom,
@@ -1096,7 +1539,8 @@ static void relay_terminal_draw_shared_wires(const Relay_Game *game,
         }
     }
     if (terminal->wiring) {
-        const Relay_Node *source = relay_node_world_find_const(&game->nodes,
+        const Relay_Node *source = relay_node_world_find_const(
+            relay_game_active_world_const(game),
             terminal->wiring_source_node_id);
         const Relay_NodeRenderCard card = relay_node_renderer_card(source);
         Relay_TerminalWirePath path;
@@ -1137,8 +1581,10 @@ static void relay_terminal_draw_wires(const Relay_Game *game,
 
     size_t index;
 
-    for (index = 0; index < game->nodes.connection_count; index++) {
-        const Relay_NodeConnection *connection = &game->nodes.connections[index];
+    for (index = 0; index <
+            relay_game_active_world_const(game)->connection_count; index++) {
+        const Relay_NodeConnection *connection =
+            &relay_game_active_world_const(game)->connections[index];
         Relay_TerminalWireRoute route;
         int x;
         int y;
@@ -1291,6 +1737,14 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
             relay_terminal_node_color(card.visual.color), TB_DEFAULT,
             "%s %-22.22s %s", input == NULL ? "│" : "●", content,
             output == NULL ? "│" : "●");
+        if (input != NULL) {
+            (void)tb_print(x, y + 3 + (int)row,
+                relay_terminal_port_color(input->type), TB_DEFAULT, "●");
+        }
+        if (output != NULL) {
+            (void)tb_print(x + card.width - 1, y + 3 + (int)row,
+                relay_terminal_port_color(output->type), TB_DEFAULT, "●");
+        }
     }
     if (node->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
         const int filled = (int)(node->progress * 10 / 16);
@@ -1298,9 +1752,23 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
         (void)snprintf(content, sizeof(content), "F%lld [%.*s%.*s] %2lld/16",
             (long long)node->fuel_coal, filled, "##########", 10 - filled,
             "..........", (long long)node->progress);
-    } else {
+    } else if (node->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
         (void)snprintf(content, sizeof(content), "period: %lld",
             (long long)node->clock_period);
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
+        (void)snprintf(content, sizeof(content), "public interface");
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
+        (void)snprintf(content, sizeof(content), "public interface");
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+        (void)snprintf(content, sizeof(content), "Lua process");
+    } else if (node->runtime_kind ==
+            RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER) {
+        (void)snprintf(content, sizeof(content), "module instance");
+    } else {
+        (void)snprintf(content, sizeof(content), "enabled");
     }
     (void)tb_printf(x, y + card.height - 2,
         relay_terminal_node_color(card.visual.color), TB_DEFAULT,
@@ -1328,6 +1796,85 @@ static void relay_terminal_draw_node_map(const Relay_Node *node,
         TB_DEFAULT, "◆ %s", card.definition->display_name);
 }
 
+/** Draw the active blueprint source editor in the Termbox backend. */
+static void relay_terminal_draw_editor(int divider_x, int height,
+    const Relay_Blueprint *blueprint)
+{
+    const size_t visible_lines = height > 4 ? (size_t)(height - 4) : 0;
+    const size_t text_capacity = divider_x > 9 ?
+        (size_t)(divider_x - 9) : 0;
+    const Relay_TerminalEditorView view = relay_terminal_editor_view(blueprint,
+        visible_lines, text_capacity);
+    size_t row;
+
+    for (row = 0; row < visible_lines; row++) {
+        const size_t line_number = view.first_line + row;
+        size_t start;
+        size_t length;
+
+        if (!relay_terminal_editor_line(blueprint, line_number, &start,
+                &length)) {
+            break;
+        }
+        if (view.first_column < length) {
+            start += view.first_column;
+            length -= view.first_column;
+        } else {
+            length = 0;
+        }
+        if (length > text_capacity) {
+            length = text_capacity;
+        }
+        (void)tb_printf(1, 2 + (int)row, TB_WHITE, TB_DEFAULT,
+            "%4zu │ %.*s", line_number + 1, (int)length,
+            &blueprint->source[start]);
+    }
+    if (view.cursor_line >= view.first_line &&
+        view.cursor_line < view.first_line + visible_lines) {
+        const int cursor_x = 8 +
+            (int)(view.cursor_column - view.first_column);
+        const int cursor_y = 2 + (int)(view.cursor_line - view.first_line);
+        const uint32_t character =
+            blueprint->cursor < blueprint->source_size &&
+            blueprint->source[blueprint->cursor] != '\n' ?
+                (uint32_t)(unsigned char)blueprint->source[blueprint->cursor] :
+                (uint32_t)' ';
+
+        if (cursor_x < divider_x) {
+            (void)tb_set_cell(cursor_x, cursor_y, character, TB_BLACK | TB_BOLD,
+                TB_CYAN);
+        }
+    }
+}
+
+/** Draw Relay and every open Blueprint as persistent Termbox workspace tabs. */
+static void relay_terminal_draw_workspace_tabs(int divider_x,
+    const Relay_Game *game)
+{
+    int tab_x = 1;
+    size_t index;
+
+    (void)tb_printf(tab_x, 0,
+        game->active_workspace == 0 ? TB_CYAN | TB_BOLD : TB_WHITE,
+        TB_DEFAULT, "[Relay]");
+    tab_x += (int)strlen("Relay") + 3;
+    for (index = 0; index < game->blueprints.count; index++) {
+        const Relay_Blueprint *blueprint = &game->blueprints.blueprints[index];
+        const int tab_width = (int)strlen(blueprint->name) + 2;
+
+        if (!blueprint->workspace_open) {
+            continue;
+        }
+        if (tab_x + tab_width > divider_x) {
+            break;
+        }
+        (void)tb_printf(tab_x, 0,
+            game->active_workspace == index + 1 ? TB_CYAN | TB_BOLD : TB_WHITE,
+            TB_DEFAULT, "[%s]", blueprint->name);
+        tab_x += tab_width + 1;
+    }
+}
+
 /** Render Relay's playfield and right-side control panel. */
 static void relay_terminal_draw_split(int width, int height,
     const Relay_Game *game, const Relay_Terminal *terminal)
@@ -1336,6 +1883,9 @@ static void relay_terminal_draw_split(int width, int height,
     int y;
     size_t index;
     const Relay_Node *focused;
+    const Relay_Blueprint *editing = game->editing_blueprint_id == 0 ? NULL :
+        relay_blueprint_library_find_const(&game->blueprints,
+            game->editing_blueprint_id);
 
     if (!relay_terminal_split(width, height, &divider_x)) {
         relay_terminal_draw_text(0, 0, TB_RED | TB_BOLD,
@@ -1345,21 +1895,44 @@ static void relay_terminal_draw_split(int width, int height,
     for (y = 0; y < height; y++) {
         (void)tb_set_cell(divider_x, y, '|', TB_BLACK, TB_WHITE);
     }
-    relay_terminal_draw_text(1, 0, TB_CYAN | TB_BOLD,
-        game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ? "[ Relay ]  MAP" :
-        "[ Relay ]");
-    relay_terminal_draw_grid(divider_x, height, terminal);
-    if (game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH) {
+    relay_terminal_draw_workspace_tabs(divider_x, game);
+    if (editing != NULL) {
+        relay_terminal_draw_editor(divider_x, height, editing);
+    } else {
+        relay_terminal_draw_grid(divider_x, height, terminal);
+    }
+    if (editing == NULL &&
+        game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH) {
         relay_terminal_draw_wires(game, terminal, divider_x, height);
     }
     relay_terminal_draw_text(divider_x + 2, 1, TB_CYAN | TB_BOLD,
+        editing != NULL ? "[ CODE ]" :
         game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
-            "[ SHOP ]  [ Inspect ]" : "[ Shop ]  [ INSPECT ]");
-    (void)tb_printf(divider_x + 2, 3, TB_YELLOW | TB_BOLD, TB_DEFAULT,
-        "◈ %llu", (unsigned long long)game->currency);
-    (void)tb_printf(divider_x + 2, 4, TB_WHITE, TB_DEFAULT, "wires: %zu",
-        game->nodes.connection_count);
-    if (game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
+            "[SHOP] [Inspect] [Scripts]" :
+        game->active_tab == RELAY_GAME_PANEL_TAB_INSPECTOR ?
+            "[Shop] [INSPECT] [Scripts]" :
+            "[Shop] [Inspect] [SCRIPTS]");
+    if (editing != NULL) {
+        (void)tb_printf(divider_x + 2, 3, TB_WHITE | TB_BOLD, TB_DEFAULT,
+            "revision: %llu%s", (unsigned long long)editing->revision,
+            editing->dirty ? "  modified" : "");
+        (void)tb_printf(divider_x + 2, 4, TB_WHITE, TB_DEFAULT, "mode: %s",
+            relay_terminal_editor_mode_label(editing->editor_mode));
+        (void)tb_printf(divider_x + 2, 5,
+            editing->dirty ? TB_YELLOW : TB_GREEN, TB_DEFAULT, "%.36s",
+            editing->diagnostic.message);
+        if (editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND) {
+            (void)tb_printf(divider_x + 2, 7, TB_CYAN | TB_BOLD, TB_DEFAULT,
+                ":%s", editing->editor_command);
+        }
+    } else {
+        (void)tb_printf(divider_x + 2, 3, TB_YELLOW | TB_BOLD, TB_DEFAULT,
+            "◈ %llu", (unsigned long long)game->currency);
+        (void)tb_printf(divider_x + 2, 4, TB_WHITE, TB_DEFAULT, "wires: %zu",
+            relay_game_active_world_const(game)->connection_count);
+    }
+    if (editing == NULL &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_SHOP) {
         for (index = 0; index < relay_game_shop_offer_count() &&
             6 + (int)index < height - 2; index++) {
             const Relay_ShopOffer *offer = relay_game_shop_offer_at(index);
@@ -1370,14 +1943,16 @@ static void relay_terminal_draw_split(int width, int height,
                 TB_DEFAULT, "%c %s %llu", index == game->selected_offer ? '>' : ' ',
                 definition->display_name, (unsigned long long)offer->price);
         }
-    } else {
-        focused = relay_node_world_find_const(&game->nodes, game->focused_node_id);
+    } else if (editing == NULL &&
+        game->active_tab == RELAY_GAME_PANEL_TAB_INSPECTOR) {
+        focused = relay_node_world_find_const(relay_game_active_world_const(game),
+            game->focused_node_id);
         if (focused == NULL) {
             relay_terminal_draw_text(divider_x + 2, 6, TB_WHITE,
                 "No node selected.");
         } else {
-            const Relay_NodeDefinition *definition = relay_node_definition_find(
-                focused->definition_id);
+            const Relay_NodeDefinition *definition =
+                relay_node_definition_for(focused);
 
             if (definition == NULL) {
                 relay_terminal_draw_text(divider_x + 2, 6, TB_RED,
@@ -1404,11 +1979,69 @@ static void relay_terminal_draw_split(int width, int height,
                     "fuel coal: %lld", (long long)focused->fuel_coal);
                 (void)tb_printf(divider_x + 2, 10, TB_WHITE, TB_DEFAULT,
                     "progress: %lld / 16", (long long)focused->progress);
+            } else if (focused->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
+                relay_terminal_draw_text(divider_x + 2, 9, TB_CYAN | TB_BOLD,
+                    "Public module inputs");
+                relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,
+                    "Wire outputs to components.");
+                relay_terminal_draw_text(divider_x + 2, 12, TB_WHITE,
+                    "VHDL: entity input ports");
+            } else if (focused->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
+                relay_terminal_draw_text(divider_x + 2, 9, TB_CYAN | TB_BOLD,
+                    "Public module outputs");
+                relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,
+                    "Wire components into inputs.");
+                relay_terminal_draw_text(divider_x + 2, 12, TB_WHITE,
+                    "VHDL: entity output ports");
+            } else if (focused->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+                relay_terminal_draw_text(divider_x + 2, 9,
+                    TB_MAGENTA | TB_BOLD, "Player Lua process");
+                relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,
+                    "Ports mirror this module.");
+                relay_terminal_draw_text(divider_x + 2, 12, TB_YELLOW,
+                    "E: edit source");
+            } else if (focused->blueprint_id != 0) {
+                const Relay_Blueprint *blueprint =
+                    relay_blueprint_library_find_const(&game->blueprints,
+                        focused->blueprint_id);
+
+                if (blueprint != NULL) {
+                    (void)tb_printf(divider_x + 2, 9, TB_WHITE, TB_DEFAULT,
+                        "key: %s", blueprint->key);
+                    (void)tb_printf(divider_x + 2, 10, TB_WHITE, TB_DEFAULT,
+                        "revision: %llu",
+                        (unsigned long long)blueprint->compiled_revision);
+                    relay_terminal_draw_text(divider_x + 2, 12, TB_WHITE,
+                        "Reusable module instance");
+                    relay_terminal_draw_text(divider_x + 2, 13, TB_YELLOW,
+                        "E: edit source");
+                }
             }
         }
+    } else if (editing == NULL) {
+        for (index = 0; index < game->blueprints.count &&
+            6 + (int)index < height - 2; index++) {
+            const Relay_Blueprint *blueprint =
+                &game->blueprints.blueprints[index];
+
+            (void)tb_printf(divider_x + 2, 6 + (int)index,
+                index == game->selected_blueprint ? TB_GREEN | TB_BOLD :
+                    TB_WHITE,
+                TB_DEFAULT, "%c %s",
+                index == game->selected_blueprint ? '>' : ' ',
+                blueprint->name);
+        }
     }
-    for (index = 0; index < game->nodes.count; index++) {
-        const Relay_Node *node = &game->nodes.nodes[index];
+    for (index = 0; editing == NULL &&
+        index < relay_game_active_world_const(game)->count; index++) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index];
+        if (!relay_terminal_node_is_visible(node)) {
+            continue;
+        }
         if (game->workspace_mode == RELAY_GAME_WORKSPACE_MAP) {
             relay_terminal_draw_node_map(node, terminal, divider_x, height);
         } else {
@@ -1416,10 +2049,29 @@ static void relay_terminal_draw_split(int width, int height,
         }
     }
     relay_terminal_draw_text(divider_x + 2, height - 3, TB_YELLOW,
-        "Tab: panel");
+        editing != NULL &&
+            editing->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT ?
+                "INSERT  Esc: normal" :
+        editing != NULL &&
+            editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
+                ":w deploy  :wq deploy/back" :
+        editing != NULL ? "NORMAL  i/a/o insert  : command" :
+            "N:new ,/.:tab C:close E:edit");
     relay_terminal_draw_text(divider_x + 2, height - 2, TB_YELLOW,
+        editing != NULL &&
+            editing->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT ?
+                "type/edit  Enter newline" :
+        editing != NULL &&
+            editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
+                "Enter: run  Esc: cancel" :
+        editing != NULL ? "hjkl move  x delete  Esc back" :
         game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
-            "j/k: select  Enter: buy" : "click a title to inspect");
+            "j/k: select  Enter: buy" :
+        game->active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS ?
+            "j/k pick  O:open  Enter:add" :
+        game->active_workspace != 0 ?
+            "Inputs -> components -> Outputs" :
+            "click a title to inspect");
 }
 
 /** Draw the centered exit-confirmation dialog above the current workspace. */
@@ -1488,7 +2140,8 @@ void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
         !relay_terminal_split(tb_width(), tb_height(), &divider_x)) {
         return;
     }
-    node = relay_node_world_find_const(&game->nodes, node_id);
+    node = relay_node_world_find_const(relay_game_active_world_const(game),
+        node_id);
     if (node == NULL) {
         return;
     }
@@ -1512,13 +2165,16 @@ static Relay_NodeId relay_terminal_node_at(const Relay_Game *game,
         mouse_x < 0 || mouse_x >= divider_x || mouse_y < 2) {
         return 0;
     }
-    for (index = game->nodes.count; index > 0; index--) {
-        const Relay_Node *node = &game->nodes.nodes[index - 1];
+    for (index = relay_game_active_world_const(game)->count; index > 0;
+            index--) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index - 1];
         const Relay_NodeRenderCard card = relay_node_renderer_card(node);
         const int x = 2 + node->grid_x + terminal->grid_offset_x;
         const int y = 3 + node->grid_y + terminal->grid_offset_y;
 
-        if (mouse_x > x && mouse_x < x + card.width - 1 &&
+        if (relay_terminal_node_is_visible(node) &&
+            mouse_x > x && mouse_x < x + card.width - 1 &&
             mouse_y == y + 1) {
             return node->id;
         }
@@ -1536,19 +2192,23 @@ static Relay_TerminalPortHit relay_terminal_port_at(const Relay_Game *game,
     if (game->workspace_mode != RELAY_GAME_WORKSPACE_GRAPH) {
         return (Relay_TerminalPortHit){0};
     }
-    for (index = game->nodes.count; index > 0; index--) {
-        const Relay_Node *node = &game->nodes.nodes[index - 1];
+    for (index = relay_game_active_world_const(game)->count; index > 0;
+            index--) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index - 1];
         const Relay_NodeRenderCard card = relay_node_renderer_card(node);
         const int x = 2 + node->grid_x + terminal->grid_offset_x;
         const int y = 3 + node->grid_y + terminal->grid_offset_y;
         const int row = mouse_y - (y + 3);
 
-        if (card.definition != NULL && row >= 0 &&
+        if (relay_terminal_node_is_visible(node) &&
+            card.definition != NULL && row >= 0 &&
             row < (int)card.definition->input_count && mouse_x >= x &&
             mouse_x < x + card.width / 2) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, false};
         }
-        if (card.definition != NULL && row >= 0 &&
+        if (relay_terminal_node_is_visible(node) &&
+            card.definition != NULL && row >= 0 &&
             row < (int)card.definition->output_count && mouse_x >=
             x + card.width / 2 && mouse_x < x + card.width) {
             return (Relay_TerminalPortHit){node->id, (size_t)row, true};
@@ -1590,12 +2250,27 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
             event->key = RELAY_TERMINAL_KEY_UP;
         } else if (termbox_event.key == TB_KEY_ARROW_DOWN) {
             event->key = RELAY_TERMINAL_KEY_DOWN;
+        } else if (termbox_event.key == TB_KEY_ARROW_LEFT) {
+            event->key = RELAY_TERMINAL_KEY_LEFT;
+        } else if (termbox_event.key == TB_KEY_ARROW_RIGHT) {
+            event->key = RELAY_TERMINAL_KEY_RIGHT;
         } else if (termbox_event.key == TB_KEY_TAB) {
             event->key = RELAY_TERMINAL_KEY_TAB;
         } else if (termbox_event.key == TB_KEY_ENTER) {
             event->key = RELAY_TERMINAL_KEY_CONFIRM;
         } else if (termbox_event.key == TB_KEY_ESC) {
             event->key = RELAY_TERMINAL_KEY_ESCAPE;
+        } else if (termbox_event.key == TB_KEY_BACKSPACE ||
+            termbox_event.key == TB_KEY_BACKSPACE2) {
+            event->key = RELAY_TERMINAL_KEY_BACKSPACE;
+        } else if (termbox_event.key == TB_KEY_DELETE) {
+            event->key = RELAY_TERMINAL_KEY_DELETE;
+        } else if (termbox_event.key == TB_KEY_HOME) {
+            event->key = RELAY_TERMINAL_KEY_HOME;
+        } else if (termbox_event.key == TB_KEY_END) {
+            event->key = RELAY_TERMINAL_KEY_END;
+        } else if (termbox_event.key == TB_KEY_CTRL_S) {
+            event->key = RELAY_TERMINAL_KEY_SAVE;
         }
     } else if (termbox_event.type == TB_EVENT_MOUSE) {
         event->type = RELAY_TERMINAL_EVENT_MOUSE;
@@ -1603,9 +2278,22 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
         event->mouse_y = termbox_event.y;
         if (termbox_event.key == TB_KEY_MOUSE_LEFT && !terminal->dragging_grid &&
             !terminal->dragging_node && !terminal->wiring &&
+            relay_terminal_workspace_tab_at(game, tb_width(), tb_height(),
+                event->mouse_x, event->mouse_y) != 0) {
+            event->workspace_tab_index_plus_one =
+                relay_terminal_workspace_tab_at(game, tb_width(), tb_height(),
+                    event->mouse_x, event->mouse_y);
+            return true;
+        }
+        if (game->editing_blueprint_id != 0) {
+            return true;
+        }
+        if (termbox_event.key == TB_KEY_MOUSE_LEFT && !terminal->dragging_grid &&
+            !terminal->dragging_node && !terminal->wiring &&
             relay_terminal_panel_tab_at(tb_width(), tb_height(), event->mouse_x,
                 event->mouse_y)) {
-            event->panel_tab_clicked = true;
+            event->panel_tab_index_plus_one = relay_terminal_panel_tab_at(
+                tb_width(), tb_height(), event->mouse_x, event->mouse_y);
             return true;
         } else if (termbox_event.key == TB_KEY_MOUSE_LEFT &&
             !terminal->dragging_grid && !terminal->dragging_node &&

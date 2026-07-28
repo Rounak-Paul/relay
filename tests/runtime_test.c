@@ -4,6 +4,8 @@
 #include <stdatomic.h>
 
 int relay_game_test(void);
+int relay_blueprint_test(void);
+int relay_script_runtime_test(void);
 
 /** State shared by the event-bus observer regression test. */
 typedef struct Relay_EventTestState {
@@ -54,7 +56,9 @@ int main(void)
     atomic_int job_count = 0;
     size_t index;
 
-    if (relay_game_test() != 0 || !relay_event_bus_init(&bus)) {
+    if (relay_game_test() != 0 || relay_blueprint_test() != 0 ||
+        relay_script_runtime_test() != 0 ||
+        !relay_event_bus_init(&bus)) {
         return 1;
     }
     event_state.bus = &bus;

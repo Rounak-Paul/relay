@@ -25,6 +25,15 @@ dependencies. Termbox2 is vendored in `vendors/termbox2`; its header-only
 implementation is compiled into the executable on macOS and Linux. Windows
 uses the native Console API because upstream Termbox2 is POSIX-only.
 
+Lua 5.5.0 is checksum-pinned under `vendors/lua/` and compiled into the
+executable as a private static library. Relay opens only its sandboxed safe
+subset; there is no external Lua installation, interpreter executable, dynamic
+module loader, filesystem, operating-system, debug, or math library available
+to player programs. See [the Blueprint guide](docs/BLUEPRINTS.md) for the
+editor, module API, and sandbox rules, and
+[the scripting roadmap](docs/SCRIPTING_BLUEPRINT_ROADMAP.md) for the staged
+long-term capability model.
+
 Runtime diagnostics are written only to `logs/relay.log`, keeping the terminal
 surface reserved for the game UI.
 
@@ -39,7 +48,7 @@ Clock modules. Use `j`/`k` or the arrow keys to choose an offer, then Enter to
 purchase and place it in the Relay workspace. Drag either the Clock output row
 or the Coal Miner input row onto its compatible opposite port to wire them
 together. A Clock emits its `Clock` signal every configured gameplay ticks.
-Press Tab or click either panel tab to switch between Shop and Inspector. Click
+Press Tab or click a panel tab to switch between Shop, Inspector, and Scripts. Click
 a node title to focus it and open its Inspector. Its Clocking Wizard
 shows the `Clock` signal and current period; use `[` and `]` to choose 2, 4,
 8, 16, 32, 64, or 128 ticks.
@@ -59,12 +68,39 @@ cyan orthogonal wires with rounded turns and short port stubs, rendered behind
 the cards. A matching live wire previews its route while you drag from either
 port direction; forward links use the minimal centered path, while reverse
 links take a safe outside-card detour. All wires follow panning and node movement.
+Port colors identify their fixed semantic type: Clock is cyan and Coal is amber.
+Types are enforced by the graph, so a Coal output cannot feed a Clock input.
 
 Every purchased node becomes the viewport focus. Press `m` to toggle the Relay
 map view, which zooms out to compact node names; drag its empty space to pan at
 the map scale. Escape is always Back: it first returns from map view, then
 opens a centered exit confirmation from the graph view. Press Enter there to
 exit, or Escape to cancel. `q` never exits the game.
+
+## Script Blueprints
+
+Press `N` to create a compiled Blueprint and open its top-level design scene.
+Relay remains permanently visible as the first tab. Open Blueprint tabs appear
+beside it; click a visible tab or use `,` and `.` to move between open tabs.
+Press `C` to close the active Blueprint tab without deleting its source, scene,
+or placed instances. Each Blueprint architecture contains `Module Inputs`,
+`Lua Core`, and `Module Outputs`. Add another Blueprint from the Scripts panel,
+then wire `Module Inputs → child component → Module Outputs` to create a typed
+HDL-style port map. The default wires through `Lua Core` are replaceable.
+Architectures recursively compile into one deterministic flattened
+`Relay_NodeWorld`; direct and indirect dependency cycles are rejected. Press
+`O` to open the selected Blueprint or Enter to add it as a normal typed node in
+the active scene.
+
+Press `E` in a Blueprint scene, or while one of its module nodes is focused, to
+open the modal code editor. Normal mode supports `h`/`j`/`k`/`l`, `0`, `$`,
+`x`, `i`, `a`, `I`, `A`, and `o`. Escape returns insert or command mode to
+normal mode. Use `:w` to validate, compile, and transactionally deploy, `:wq`
+to deploy and return, or `:q` to return while retaining the draft. A failed
+compile leaves the prior installed revision running and shows the diagnostic in
+the right panel. Escape from normal mode returns to the graph without closing
+the application. Escape from a Blueprint graph returns to Relay; a subsequent
+Escape from Relay opens the exit confirmation.
 
 ## Embedded font
 

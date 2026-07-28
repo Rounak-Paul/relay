@@ -41,6 +41,47 @@ event.
 `tests/runtime_test.c` proves that an observer can safely remove itself during
 dispatch and that submitted work completes across multiple worker threads.
 
+## Scripting and blueprint boundary
+
+`vendors/lua/` contains the checksum-pinned Lua 5.5.0 upstream distribution.
+`CMakeLists.txt` builds the required core and safe libraries as the private
+static `relay_lua` target; it does not build the Lua interpreter or compiler
+executables. `src/script_runtime.c` owns the application Lua state, fixed string
+hash seed, hard allocator limit, selected-library initialization, and fail-closed
+sandbox validation. Only base, string, table, and UTF-8 libraries are compiled
+and opened. Unsafe base globals and unordered table iteration are removed.
+`Relay_App` initializes and shuts down the runtime through its normal lifecycle.
+
+Lua is syntax and execution infrastructure, not a second simulation.
+`src/script_runtime.c` compiles each module in an isolated environment, enforces
+integer-only source rules and deterministic instruction/memory limits, then
+invokes it with a read-only fixed-tick input snapshot. Each placed module owns a
+bounded scalar state table; state and outputs commit only after a successful
+invocation. Lua headers and state pointers remain private and gameplay-facing
+values stay project-owned.
+
+`src/blueprint.c` owns stable player Blueprint IDs, dotted keys, source
+revisions, typed schemas, compiled artifacts, boundary/core definitions,
+top-level architecture scenes, and immutable flattened plans. Every scene owns
+`Module Inputs`, `Lua Core`, and `Module Outputs`; nested Blueprint wrappers and
+ordinary nodes connect between those boundaries through normal typed
+`Relay_NodeWorld` edges. Compilation validates dependency acyclicity and public
+output coverage, recursively flattens child plans, and records external input
+fan-out and output-source bindings. Instantiation transactionally creates one
+visible wrapper plus private implementation nodes with Blueprint/node
+provenance. Runtime execution remains one graph and one previous-tick wire
+model, never a nested or scripting-only simulator.
+
+`Relay_Game` owns workspace selection, editor commands, design-graph mutation,
+instantiation, and fixed-tick execution. Failed architecture mutations restore
+the prior connection or node boundary and preserve the last valid plan. Direct
+and indirect recursive dependencies are rejected. Interface-changing
+redeployment is rejected after instances or architecture references exist,
+while compatible code changes replace the Lua artifact transactionally. The
+implemented workflow is documented in `docs/BLUEPRINTS.md`; persistence,
+debugger, and broader language capability gates remain in
+`docs/SCRIPTING_BLUEPRINT_ROADMAP.md`.
+
 ## Game node boundary
 
 `src/node.c` owns the immutable source-node registry and dynamic `Relay_NodeWorld`.
@@ -58,11 +99,13 @@ inputs and right-side outputs without source-specific branches.
 
 `Relay_NodeWorld` is the runtime graph for the root gameplay module: it owns
 instances and typed directed connections. A connection is an output port to one
-input port; replacing an input's wire is deliberate, and type compatibility is
-validated centrally. This graph contract is also the future boundary for
-built-in reusable modules and script-authored VHDL-like modules, so scripting
-must use stable node IDs, port indexes, and property APIs rather than terminal
-coordinates or mutable storage.
+input port; replacing an input's wire is deliberate, and exact compatibility is
+validated centrally through fixed `Relay_NodePortType` values. Port types are
+separate from property scalar types: Clock, Coal, Iron Ore, Copper Ore, Stone,
+Boolean, Integer, and Text are semantic graph channels. This graph contract is
+the implemented boundary for built-in reusable modules and script-authored
+VHDL-like modules. Scripting uses stable node IDs, port indexes, and property
+APIs rather than terminal coordinates or mutable storage.
 
 The initial graph starts with one Coal Miner. The Shop sells Clock modules. A
 Clock emits its `Clock` signal at one of the valid periods (2 through 128 fixed ticks),
@@ -101,21 +144,44 @@ Mouse hit testing uses the full left half of an input row and the full right
 half of an output row, rather than a single connector glyph. A wire may begin
 from either side; terminal input normalizes that interaction to one output-to-
 input graph connection before the game validates it.
+`relay_node_renderer_port_visual` owns the terminal-agnostic type color token,
+which both terminal backends apply to the port glyphs. Clock ports are cyan and
+Coal ports are amber, so the visual language mirrors the graph's exact type rule.
 
 `Relay_Game.workspace_mode` owns the graph/map workspace state and
 `focused_node_id` records the active node for inspection as well as the last node
 created by a successful purchase. The terminal centers newly created nodes after
 creation; clicking a card title changes focus through `relay_game_focus_node`
 and activates the Inspector.
-`Relay_Game.active_tab` owns the Shop/Inspector choice. Tab switches the wider
-right-side control panel between those views; clicking its tab strip toggles the
-same state. The Inspector reads the immutable
+`Relay_Game.active_tab` owns the Shop/Inspector/Scripts choice. Tab cycles the
+wider right-side control panel, while mouse hit testing selects the exact tab
+clicked. The Inspector reads the immutable
 definition and script-visible node properties; a focused Clock presents its
 Clocking Wizard configuration and valid period set without a parallel UI-only
 configuration model. `m` toggles the compact map renderer;
 Escape is a universal Back request, returning map view to graph view before the
 application opens its centered exit-confirmation overlay. Only Enter confirms
 that overlay; `q` is never an exit shortcut.
+
+Relay is the permanently open top-level workspace zero and each Blueprint owns
+one additional architecture scene plus independent tab-open state. Creating or
+opening a Blueprint makes its tab visible beside Relay; closing removes only the
+tab and preserves its definition, source, scene, artifact, plan, and instances.
+Mouse clicks activate exact visible tabs, while `,` and `.` cycle only open
+tabs. The Scripts panel opens the selected Blueprint with `O` or places its
+compiled module into Relay or another Blueprint with Enter. Architecture scenes
+show their public input/output boundaries and Lua core as normal graph cards;
+the inspector explains the `Module Inputs -> components -> Module Outputs`
+port-map direction. `E` opens either the active Blueprint or a focused
+Blueprint node in the bounded code editor. Editor mutations stay in game-owned
+source buffers;
+the modal normal/insert/command state is Blueprint-owned, and `:w`/`:wq`
+perform transactional deployment without depending on terminal control-key
+forwarding. Escape first returns insert/command mode to normal, then consumes
+Back through the Blueprint architecture and Relay workspace before any exit
+prompt. Both terminal backends share the editor viewport and line parsing logic
+and expose source revision, dirty state, command text, and diagnostics in the
+panel.
 
 ## Embedded font boundary
 

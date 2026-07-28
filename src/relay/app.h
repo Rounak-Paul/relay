@@ -5,6 +5,7 @@
 #include "relay/game.h"
 #include "relay/job_system.h"
 #include "relay/logger.h"
+#include "relay/script_runtime.h"
 #include "relay/terminal.h"
 
 #include <stdbool.h>
@@ -24,9 +25,10 @@ typedef enum Relay_AppState {
 typedef struct Relay_App {
     Relay_AppState state;
     Relay_EventBus events;
+    Relay_Logger logger;
+    Relay_ScriptRuntime scripts;
     Relay_Game game;
     Relay_JobSystem jobs;
-    Relay_Logger logger;
     Relay_Terminal terminal;
     Relay_TerminalOverlay overlay;
     bool should_exit;
