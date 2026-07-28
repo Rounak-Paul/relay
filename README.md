@@ -84,9 +84,12 @@ Relay remains permanently visible as the first tab. Open Blueprint tabs appear
 beside it; click a visible tab or use `,` and `.` to move between open tabs.
 Press `C` to close the active Blueprint tab without deleting its source, scene,
 or placed instances. Each Blueprint architecture contains `Module Inputs`,
-`Lua Core`, and `Module Outputs`. Add another Blueprint from the Scripts panel,
-then wire `Module Inputs → child component → Module Outputs` to create a typed
-HDL-style port map. The default wires through `Lua Core` are replaceable.
+`Module Outputs`, and only the real components added by the player—the
+Blueprint never renders itself as a middle node. Add another Blueprint from the
+Scripts panel, then wire `Module Inputs → child component → Module Outputs` to
+create a typed HDL-style port map. Graph additions, connections, replacements,
+and component layout are synchronized into the source's canonical architecture
+section; editing that section and saving rebuilds the graph.
 Architectures recursively compile into one deterministic flattened
 `Relay_NodeWorld`; direct and indirect dependency cycles are rejected. Press
 `O` to open the selected Blueprint or Enter to add it as a normal typed node in

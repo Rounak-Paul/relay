@@ -76,6 +76,9 @@ must be cycle-checked and compiled into the same `Relay_NodeWorld` graph with
 instance/local-path provenance. Do not introduce an opaque blueprint simulator,
 parallel wire format, or script-only module graph. Follow the complete stage
 contracts and exit criteria in `docs/SCRIPTING_BLUEPRINT_ROADMAP.md`.
+The Blueprint's own program is an implicit process, never a component in its
+visual architecture. Keep the canonical source architecture region and visual
+graph transactionally synchronized in both directions.
 
 ## Workspace rendering
 

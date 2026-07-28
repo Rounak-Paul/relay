@@ -56,8 +56,13 @@ int main(void)
     atomic_int job_count = 0;
     size_t index;
 
-    if (relay_game_test() != 0 || relay_blueprint_test() != 0 ||
-        relay_script_runtime_test() != 0 ||
+    if (relay_game_test() != 0) {
+        return 11;
+    }
+    if (relay_blueprint_test() != 0) {
+        return 12;
+    }
+    if (relay_script_runtime_test() != 0 ||
         !relay_event_bus_init(&bus)) {
         return 1;
     }

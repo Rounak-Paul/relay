@@ -18,7 +18,8 @@ typedef enum Relay_BuiltinNodeDefinitionId {
 typedef uint64_t Relay_NodeId;
 
 enum {
-    RELAY_NODE_MAX_PORTS = 8
+    RELAY_NODE_MAX_PORTS = 8,
+    RELAY_NODE_LOCAL_KEY_CAPACITY = 32
 };
 
 /** Opaque persistent script state owned by one placed module instance. */
@@ -38,7 +39,7 @@ typedef enum Relay_NodeCategory {
 typedef enum Relay_NodeRuntimeKind {
     RELAY_NODE_RUNTIME_ATOMIC,
     RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER,
-    RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE,
+    RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS,
     RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY,
     RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY
 } Relay_NodeRuntimeKind;
@@ -120,6 +121,7 @@ typedef struct Relay_Node {
     uint64_t origin_blueprint_id;
     Relay_NodeId origin_node_id;
     Relay_NodeId module_instance_id;
+    char local_key[RELAY_NODE_LOCAL_KEY_CAPACITY];
     Relay_ScriptInstanceState script_state;
     Relay_NodeRuntimeKind runtime_kind;
     bool enabled;

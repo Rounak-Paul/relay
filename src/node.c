@@ -1,5 +1,6 @@
 #include "relay/node.h"
 
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,6 +180,8 @@ Relay_NodeId relay_node_world_create_definition(Relay_NodeWorld *world,
     node->id = id;
     node->definition_id = definition->id;
     node->definition = definition;
+    (void)snprintf(node->local_key, sizeof(node->local_key), "n%llu",
+        (unsigned long long)id);
     node->grid_x = grid_x;
     node->grid_y = grid_y;
     node->clock_period = 2;

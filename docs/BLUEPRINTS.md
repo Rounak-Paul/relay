@@ -1,15 +1,16 @@
 # Script Blueprints
 
 Relay Blueprints are hierarchical modules with a typed public interface, a
-visual architecture, and an optional player-authored Lua process. They follow
+visual architecture, and a player-authored Lua process. They follow
 the same model as an HDL entity plus architecture: the source declares public
-ports and implements the `Lua Core`, while the Blueprint graph connects those
-ports to built-in nodes or other Blueprints. A compiled Blueprint can be placed
-in Relay or used as a component inside another Blueprint.
+ports and module behavior, while the architecture connects those ports to
+built-in nodes or other Blueprints. The module itself is never displayed as a
+component in its own scene. A compiled Blueprint can be placed in Relay or used
+as a component inside another Blueprint.
 
 A placed Blueprint is an ordinary `Relay_NodeWorld` node. Port typing,
 one-source-per-input, output fan-out, previous-tick wire latency, and fixed-tick
-simulation are identical for built-in nodes, Lua cores, and nested modules.
+simulation are identical for built-in nodes, module processes, and nested modules.
 Compilation recursively flattens the hierarchy into this one graph contract;
 there is no scripting-only wire format or nested simulator.
 
@@ -20,14 +21,14 @@ there is no scripting-only wire format or nested simulator.
 3. Declare the module's public inputs and outputs, then implement `tick` for
    any behavior that belongs in its Lua process.
 4. Return to normal mode and enter `:w` to compile and deploy it.
-5. Press Escape to return to the visual architecture. It always contains
-   `Module Inputs`, `Lua Core`, and `Module Outputs`.
+5. Press Escape to return to the visual architecture. It contains
+   `Module Inputs`, `Module Outputs`, and only the real components you add.
 6. To use another Blueprint as a component, open the Scripts panel with Tab or
    a mouse click, select it with `j`/`k`, and press Enter.
 7. Wire from the right-side ports of `Module Inputs` into component inputs,
    then wire component outputs into the left-side ports of `Module Outputs`.
-   The default `Module Inputs → Lua Core → Module Outputs` wires may be
-   replaced simply by connecting a new source to the same input.
+   Unmapped outputs are produced by the module's implicit Lua process; wiring a
+   component into a `Module Outputs` port overrides that output mapping.
 8. Use `,` or `.` to move through open Relay and Blueprint tabs.
 9. In Relay, open the Scripts panel and select a Blueprint with
    `j`/`k`.
@@ -38,7 +39,7 @@ there is no scripting-only wire format or nested simulator.
 The Scripts panel may place a Blueprint in Relay or in a different Blueprint
 scene. Direct or indirect recursive instantiation is rejected. Every root
 placement creates a visible module wrapper plus private flattened implementation
-nodes. Each Lua core in each placement owns independent persistent state.
+nodes. Each module process in each placement owns independent persistent state.
 
 ## Visual port mapping
 
@@ -58,15 +59,38 @@ when both declared port types match. An output may feed several destinations;
 an input has one source, and a new valid wire replaces its previous source.
 
 `Module Inputs` and `Module Outputs` are architecture boundary nodes, not
-runtime machines. `Lua Core` is a normal executable component whose ports mirror
-the current source declarations. It remains in the architecture so a module can
-combine Lua behavior with visual components, or be bypassed entirely when the
-architecture is purely structural. Every public output must have a valid source
-before the architecture can compile.
+runtime machines. The Lua `tick` function is the Blueprint's implicit process;
+it compiles into the flattened implementation but is deliberately not rendered
+as a self-component. A visual output mapping replaces the implicit process as
+that public output's source.
 
-Nested plans are elaborated transactionally. Missing output bindings, unavailable
-dependencies, type errors, and dependency cycles preserve the last valid plan
-and do not leave partial runtime nodes or wires.
+Nested plans are elaborated transactionally. Unavailable dependencies, invalid
+port maps, type errors, and dependency cycles preserve the last valid plan and
+do not leave partial runtime nodes or wires.
+
+## Source and graph synchronization
+
+The source owns a canonical architecture region:
+
+```lua
+-- relay architecture begin
+-- component n3 : blueprint.script_2 at (96, 0)
+-- port map input.clock => n3.clock
+-- port map n3.clock_out => output.clock_out
+-- relay architecture end
+```
+
+This is Relay's compact VHDL-style component/port-map representation. Component
+keys, definition keys, coordinates, and port keys are stable data rather than
+display labels.
+
+Adding a component, connecting a wire, replacing an input source, or moving a
+component updates this region and transactionally recompiles the Blueprint.
+Editing the canonical component or port-map statements and saving with `:w`
+rebuilds the visual architecture through the same parser and typed graph
+validation. Component declarations must precede their port maps. Invalid keys,
+directions, types, duplicate input sources, self-imports, or dependency cycles
+leave both the previous graph and compiled plan installed.
 
 Relay is a permanent pinned tab. Creating a Blueprint opens its tab beside
 Relay. `C` closes the active Blueprint tab and returns to Relay; closing a tab

@@ -15,7 +15,7 @@ enum {
     RELAY_BLUEPRINT_SOURCE_CAPACITY = 8192,
     RELAY_BLUEPRINT_DEFINITION_ID_BASE = 1000,
     RELAY_BLUEPRINT_INPUT_DEFINITION_ID_BASE = 2000,
-    RELAY_BLUEPRINT_CORE_DEFINITION_ID_BASE = 3000,
+    RELAY_BLUEPRINT_PROCESS_DEFINITION_ID_BASE = 3000,
     RELAY_BLUEPRINT_OUTPUT_DEFINITION_ID_BASE = 4000
 };
 
@@ -95,22 +95,20 @@ typedef struct Relay_Blueprint {
     Relay_ScriptSchema schema;
     Relay_NodeDefinition definition;
     Relay_NodeDefinition input_boundary_definition;
-    Relay_NodeDefinition script_core_definition;
+    Relay_NodeDefinition process_definition;
     Relay_NodeDefinition output_boundary_definition;
     Relay_NodePortDefinition inputs[RELAY_NODE_MAX_PORTS];
     Relay_NodePortDefinition outputs[RELAY_NODE_MAX_PORTS];
     Relay_NodePortDefinition input_boundary_outputs[RELAY_NODE_MAX_PORTS];
-    Relay_NodePortDefinition script_core_inputs[RELAY_NODE_MAX_PORTS];
-    Relay_NodePortDefinition script_core_outputs[RELAY_NODE_MAX_PORTS];
+    Relay_NodePortDefinition process_inputs[RELAY_NODE_MAX_PORTS];
+    Relay_NodePortDefinition process_outputs[RELAY_NODE_MAX_PORTS];
     Relay_NodePortDefinition output_boundary_inputs[RELAY_NODE_MAX_PORTS];
     Relay_NodeWorld scene;
     Relay_BlueprintPlan plan;
     Relay_NodeId input_boundary_node_id;
-    Relay_NodeId script_core_node_id;
     Relay_NodeId output_boundary_node_id;
     Relay_NodeId focused_node_id;
     size_t instance_count;
-    size_t architecture_reference_count;
     Relay_ScriptDiagnostic diagnostic;
     char editor_command[32];
     size_t editor_command_size;

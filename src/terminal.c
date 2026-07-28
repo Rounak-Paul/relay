@@ -712,7 +712,7 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
             RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
         (void)snprintf(content, sizeof(content), "public interface");
     } else if (node->runtime_kind ==
-            RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+            RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
         (void)snprintf(content, sizeof(content), "Lua process");
     } else if (node->runtime_kind ==
             RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER) {
@@ -961,7 +961,7 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
                     return false;
                 }
             } else if (focused->runtime_kind ==
-                    RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+                    RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
                 if (!relay_terminal_write_at(output, divider_x + 2, 9,
                         "Player Lua process") ||
                     !relay_terminal_write_at(output, divider_x + 2, 10,
@@ -1762,7 +1762,7 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
             RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
         (void)snprintf(content, sizeof(content), "public interface");
     } else if (node->runtime_kind ==
-            RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+            RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
         (void)snprintf(content, sizeof(content), "Lua process");
     } else if (node->runtime_kind ==
             RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER) {
@@ -1996,7 +1996,7 @@ static void relay_terminal_draw_split(int width, int height,
                 relay_terminal_draw_text(divider_x + 2, 12, TB_WHITE,
                     "VHDL: entity output ports");
             } else if (focused->runtime_kind ==
-                    RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+                    RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
                 relay_terminal_draw_text(divider_x + 2, 9,
                     TB_MAGENTA | TB_BOLD, "Player Lua process");
                 relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,

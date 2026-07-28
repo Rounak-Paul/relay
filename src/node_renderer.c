@@ -15,7 +15,7 @@ Relay_NodeVisual relay_node_renderer_visual(const Relay_Node *node)
         node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
         return (Relay_NodeVisual){definition->glyph, 6};
     }
-    if (node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+    if (node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
         return (Relay_NodeVisual){definition->glyph, 5};
     }
     return (Relay_NodeVisual){definition->glyph, 2};

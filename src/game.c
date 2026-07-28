@@ -223,7 +223,7 @@ bool relay_game_create_blueprint(Relay_Game *game)
         true;
     relay_game_set_focused_node(game,
         game->blueprints.blueprints[
-            game->active_workspace - 1].script_core_node_id);
+            game->active_workspace - 1].input_boundary_node_id);
     game->active_tab = RELAY_GAME_PANEL_TAB_INSPECTOR;
     game->workspace_mode = RELAY_GAME_WORKSPACE_GRAPH;
     return true;
@@ -352,7 +352,6 @@ bool relay_game_add_blueprint(Relay_Game *game, Relay_BlueprintId blueprint_id)
             world->next_id = old_next_id;
             return false;
         }
-        blueprint->architecture_reference_count++;
     }
     relay_game_set_focused_node(game, node_id);
     game->active_tab = RELAY_GAME_PANEL_TAB_INSPECTOR;
@@ -756,15 +755,34 @@ static int64_t relay_game_add_delta(int64_t coordinate, int delta)
 bool relay_game_move_node(Relay_Game *game, Relay_NodeId id, int delta_x,
     int delta_y)
 {
+    Relay_NodeWorld *world;
+    Relay_Blueprint *blueprint;
     Relay_Node *node;
+    int64_t old_grid_x;
+    int64_t old_grid_y;
 
     if (game == NULL) {
         return false;
     }
-    node = relay_node_world_find(relay_game_active_world(game), id);
-    return node != NULL && relay_node_world_move(relay_game_active_world(game), id,
-        relay_game_add_delta(node->grid_x, delta_x),
-        relay_game_add_delta(node->grid_y, delta_y));
+    world = relay_game_active_world(game);
+    blueprint = relay_game_active_blueprint(game);
+    node = relay_node_world_find(world, id);
+    if (node == NULL) {
+        return false;
+    }
+    old_grid_x = node->grid_x;
+    old_grid_y = node->grid_y;
+    if (!relay_node_world_move(world, id,
+            relay_game_add_delta(old_grid_x, delta_x),
+            relay_game_add_delta(old_grid_y, delta_y))) {
+        return false;
+    }
+    if (blueprint != NULL &&
+        !relay_blueprint_rebuild_plan(&game->blueprints, blueprint)) {
+        (void)relay_node_world_move(world, id, old_grid_x, old_grid_y);
+        return false;
+    }
+    return true;
 }
 
 bool relay_game_focus_node(Relay_Game *game, Relay_NodeId id)
@@ -872,7 +890,7 @@ static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
         Relay_Node *node = &world->nodes[index];
 
         if (node->runtime_kind ==
-                RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE) {
+                RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
             relay_game_step_script(game, world, node);
         }
     }

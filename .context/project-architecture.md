@@ -63,14 +63,22 @@ values stay project-owned.
 `src/blueprint.c` owns stable player Blueprint IDs, dotted keys, source
 revisions, typed schemas, compiled artifacts, boundary/core definitions,
 top-level architecture scenes, and immutable flattened plans. Every scene owns
-`Module Inputs`, `Lua Core`, and `Module Outputs`; nested Blueprint wrappers and
-ordinary nodes connect between those boundaries through normal typed
-`Relay_NodeWorld` edges. Compilation validates dependency acyclicity and public
-output coverage, recursively flattens child plans, and records external input
-fan-out and output-source bindings. Instantiation transactionally creates one
-visible wrapper plus private implementation nodes with Blueprint/node
-provenance. Runtime execution remains one graph and one previous-tick wire
-model, never a nested or scripting-only simulator.
+`Module Inputs` and `Module Outputs`; only actual built-in or nested components
+appear between them. The Blueprint's Lua function is an implicit internal
+process and never renders as a self-component. Compilation validates dependency
+acyclicity, recursively flattens child plans, and records external input fan-out
+and output-source bindings. Instantiation transactionally creates one visible
+wrapper plus private implementation nodes with Blueprint/node provenance.
+Runtime execution remains one graph and one previous-tick wire model, never a
+nested or scripting-only simulator.
+
+The source buffer contains a canonical `relay architecture` region with stable
+component declarations, layout, and VHDL-style port maps. Successful graph
+component creation, connection replacement, and movement regenerate this region
+and recompile the artifact and plan transactionally. `:w` parses the same region
+back into a candidate scene, resolves stable definition and port keys, validates
+it through `Relay_NodeWorld`, and swaps source, scene, artifact, and plan only as
+one successful deployment.
 
 `Relay_Game` owns workspace selection, editor commands, design-graph mutation,
 instantiation, and fixed-tick execution. Failed architecture mutations restore
@@ -170,9 +178,9 @@ tab and preserves its definition, source, scene, artifact, plan, and instances.
 Mouse clicks activate exact visible tabs, while `,` and `.` cycle only open
 tabs. The Scripts panel opens the selected Blueprint with `O` or places its
 compiled module into Relay or another Blueprint with Enter. Architecture scenes
-show their public input/output boundaries and Lua core as normal graph cards;
-the inspector explains the `Module Inputs -> components -> Module Outputs`
-port-map direction. `E` opens either the active Blueprint or a focused
+show their public input/output boundaries and real components as normal graph
+cards; the inspector explains the `Module Inputs -> components -> Module
+Outputs` port-map direction. `E` opens either the active Blueprint or a focused
 Blueprint node in the bounded code editor. Editor mutations stay in game-owned
 source buffers;
 the modal normal/insert/command state is Blueprint-owned, and `:w`/`:wq`

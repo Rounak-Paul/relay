@@ -48,7 +48,8 @@ parallel scripting graph or special nested simulation path.
 Scope:
 
 - vendor Lua 5.5.0 from the official release archive with recorded SHA-256;
-- compile only the Lua core and selected safe libraries into `relay_lua`;
+- compile only the Lua implementation core and selected safe libraries into
+  `relay_lua`;
 - exclude standalone `lua`/`luac` tools and unsafe standard libraries;
 - use a fixed Lua string-hash seed and a hard allocator limit;
 - expose an application-owned, idempotent runtime lifecycle;

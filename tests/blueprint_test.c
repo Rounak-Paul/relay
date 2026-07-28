@@ -59,9 +59,8 @@ int relay_blueprint_test(void)
     }
     child = relay_game_active_blueprint(&game);
     child_id = child == NULL ? 0 : child->id;
-    if (child == NULL || child->scene.count != 3 ||
+    if (child == NULL || child->scene.count != 2 ||
         child->input_boundary_node_id == 0 ||
-        child->script_core_node_id == 0 ||
         child->output_boundary_node_id == 0 || !child->plan.valid ||
         child->plan.node_count != 1 ||
         child->plan.input_binding_count != 1 ||
@@ -93,6 +92,70 @@ int relay_blueprint_test(void)
         relay_script_runtime_shutdown(&scripts);
         return 1;
     }
+    if (strstr(parent->source,
+            "-- component n3 : blueprint.script_1 at (90, 0)") == NULL ||
+        strstr(parent->source,
+            "-- port map input.clock => n3.clock") == NULL ||
+        strstr(parent->source,
+            "-- port map n3.clock_out => output.clock_out") == NULL ||
+        !relay_game_move_node(&game, child_component_id, 5, 0) ||
+        strstr(parent->source,
+            "-- component n3 : blueprint.script_1 at (95, 0)") == NULL) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    {
+        char *layout = strstr(parent->source, "at (95, 0)");
+
+        if (layout == NULL) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+        layout[5] = '6';
+        parent->revision++;
+        parent->dirty = true;
+        if (!relay_blueprint_compile(&game.blueprints, parent) ||
+            relay_node_world_find(&parent->scene, child_component_id) == NULL ||
+            relay_node_world_find(&parent->scene,
+                child_component_id)->grid_x != 96 ||
+            parent->scene.connection_count != 2) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
+    {
+        char *port_map = strstr(parent->source,
+            "-- port map n3.clock_out");
+        const uint64_t valid_revision = parent->compiled_revision;
+
+        if (port_map == NULL) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+        port_map[15] = 'x';
+        parent->revision++;
+        parent->dirty = true;
+        if (relay_blueprint_compile(&game.blueprints, parent) ||
+            parent->compiled_revision != valid_revision ||
+            parent->scene.connection_count != 2 ||
+            relay_node_world_find(&parent->scene,
+                child_component_id)->grid_x != 96) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+        port_map[15] = 'c';
+        parent->revision++;
+        if (!relay_blueprint_compile(&game.blueprints, parent)) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
     if (!relay_game_connect_nodes(&game, parent->input_boundary_node_id, 0,
             parent->output_boundary_node_id, 0) ||
         !parent->plan.output_bindings[0].source_is_module_input ||
@@ -119,7 +182,7 @@ int relay_blueprint_test(void)
     }
     parent->scene.connections[
         output_connection_index].destination_node_id =
-        parent->script_core_node_id;
+        0;
     if (relay_blueprint_rebuild_plan(&game.blueprints, parent) ||
         !parent->plan.valid || parent->plan.node_count != deployed_plan_nodes) {
         relay_game_shutdown(&game);
@@ -188,7 +251,7 @@ int relay_blueprint_test(void)
         if ((root->nodes[index].module_instance_id == module_one->id ||
                 root->nodes[index].module_instance_id == module_two->id) &&
             root->nodes[index].runtime_kind ==
-                RELAY_NODE_RUNTIME_BLUEPRINT_SCRIPT_CORE &&
+                RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS &&
             root->nodes[index].script_state.initialized) {
             initialized_cores++;
         }
