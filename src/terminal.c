@@ -48,6 +48,36 @@ typedef struct Relay_TerminalEditorView {
     size_t cursor_column;
 } Relay_TerminalEditorView;
 
+/** Format the Timer's supported user-facing intervals from its data contract. */
+static void relay_terminal_timer_intervals(char *buffer, size_t capacity)
+{
+    size_t size = 0;
+    size_t index;
+    int written;
+
+    if (capacity == 0) {
+        return;
+    }
+    written = snprintf(buffer, capacity, "intervals:");
+    if (written < 0 || (size_t)written >= capacity) {
+        buffer[capacity - 1] = '\0';
+        return;
+    }
+    size = (size_t)written;
+    for (index = 0; index < relay_timer_interval_count(); index++) {
+        written = snprintf(&buffer[size], capacity - size, " %lld",
+            (long long)(relay_timer_interval_at(index) /
+                RELAY_GAME_SIMULATION_STEPS_PER_SECOND));
+
+        if (written < 0 || (size_t)written >= capacity - size) {
+            buffer[capacity - 1] = '\0';
+            return;
+        }
+        size += (size_t)written;
+    }
+    (void)snprintf(&buffer[size], capacity - size, " s");
+}
+
 /** Calculate a cursor-centered editor viewport without mutating game state. */
 static Relay_TerminalEditorView relay_terminal_editor_view(
     const Relay_Blueprint *blueprint, size_t visible_lines,
@@ -696,15 +726,20 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
             return false;
         }
     }
-    if (node->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
-        const int filled = (int)(node->progress * 10 / 16);
+    if (card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
+        const int64_t interval = card.definition->simulation.interval_steps;
+        const int filled = (int)(node->progress * 10 /
+            interval);
 
-        (void)snprintf(content, sizeof(content), "F%lld [%.*s%.*s] %2lld/16",
-            (long long)node->fuel_coal, filled, "##########", 10 - filled,
-            "..........", (long long)node->progress);
-    } else if (node->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
-        (void)snprintf(content, sizeof(content), "period: %lld",
-            (long long)node->clock_period);
+        (void)snprintf(content, sizeof(content), "[%.*s%.*s] %2lld/%lld",
+            filled, "##########", 10 - filled, "..........",
+            (long long)node->progress, (long long)interval);
+    } else if (card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_TIMER) {
+        (void)snprintf(content, sizeof(content), "interval: %lld s",
+            (long long)(node->timer_interval_steps /
+                RELAY_GAME_SIMULATION_STEPS_PER_SECOND));
     } else if (node->runtime_kind ==
             RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
         (void)snprintf(content, sizeof(content), "public interface");
@@ -913,31 +948,56 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
             if (!relay_terminal_write_at(output, divider_x + 2, 7, line)) {
                 return false;
             }
-            if (focused->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
+            if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_TIMER) {
                 if (!relay_terminal_write_at(output, divider_x + 2, 9,
-                        "Clocking Wizard") ||
+                        "Timer") ||
                     !relay_terminal_write_at(output, divider_x + 2, 10,
-                        "signal: Clock")) {
+                        "output: Trigger")) {
                     return false;
                 }
-                (void)snprintf(line, sizeof(line), "period: %lld ticks",
-                    (long long)focused->clock_period);
-                if (!relay_terminal_write_at(output, divider_x + 2, 11, line) ||
-                    !relay_terminal_write_at(output, divider_x + 2, 12,
-                        "rates: 2 4 8 16 32 64 128") ||
+                (void)snprintf(line, sizeof(line), "interval: %lld seconds",
+                    (long long)(focused->timer_interval_steps /
+                        RELAY_GAME_SIMULATION_STEPS_PER_SECOND));
+                if (!relay_terminal_write_at(output, divider_x + 2, 11,
+                        line)) {
+                    return false;
+                }
+                relay_terminal_timer_intervals(line, sizeof(line));
+                if (!relay_terminal_write_at(output, divider_x + 2, 12, line) ||
                     !relay_terminal_write_at(output, divider_x + 2, 13,
-                        "[ / ] change period")) {
+                        "[ / ] change interval")) {
                     return false;
                 }
-            } else if (focused->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
-                (void)snprintf(line, sizeof(line), "fuel coal: %lld",
-                    (long long)focused->fuel_coal);
+            } else if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
+                const Relay_NodeSimulationDefinition *simulation =
+                    &definition->simulation;
+                const Relay_NodePortDefinition *source_output =
+                    &definition->outputs[simulation->output_port_index];
+
+                (void)snprintf(line, sizeof(line), "output: %s",
+                    source_output->display_name);
                 if (!relay_terminal_write_at(output, divider_x + 2, 9, line)) {
                     return false;
                 }
-                (void)snprintf(line, sizeof(line), "progress: %lld / 16",
-                    (long long)focused->progress);
-                if (!relay_terminal_write_at(output, divider_x + 2, 10, line)) {
+                (void)snprintf(line, sizeof(line), "rate: %lld / second",
+                    (long long)simulation->output_amount);
+                if (!relay_terminal_write_at(output, divider_x + 2, 10,
+                        line)) {
+                    return false;
+                }
+                (void)snprintf(line, sizeof(line), "progress: %lld / %u",
+                    (long long)focused->progress,
+                    simulation->interval_steps);
+                if (!relay_terminal_write_at(output, divider_x + 2, 11,
+                        line)) {
+                    return false;
+                }
+                (void)snprintf(line, sizeof(line), "produced: %lld",
+                    (long long)focused->produced);
+                if (!relay_terminal_write_at(output, divider_x + 2, 12,
+                        line)) {
                     return false;
                 }
             } else if (focused->runtime_kind ==
@@ -1746,15 +1806,20 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
                 relay_terminal_port_color(output->type), TB_DEFAULT, "●");
         }
     }
-    if (node->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
-        const int filled = (int)(node->progress * 10 / 16);
+    if (card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
+        const int64_t interval = card.definition->simulation.interval_steps;
+        const int filled = (int)(node->progress * 10 /
+            interval);
 
-        (void)snprintf(content, sizeof(content), "F%lld [%.*s%.*s] %2lld/16",
-            (long long)node->fuel_coal, filled, "##########", 10 - filled,
-            "..........", (long long)node->progress);
-    } else if (node->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
-        (void)snprintf(content, sizeof(content), "period: %lld",
-            (long long)node->clock_period);
+        (void)snprintf(content, sizeof(content), "[%.*s%.*s] %2lld/%lld",
+            filled, "##########", 10 - filled, "..........",
+            (long long)node->progress, (long long)interval);
+    } else if (card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_TIMER) {
+        (void)snprintf(content, sizeof(content), "interval: %lld s",
+            (long long)(node->timer_interval_steps /
+                RELAY_GAME_SIMULATION_STEPS_PER_SECOND));
     } else if (node->runtime_kind ==
             RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
         (void)snprintf(content, sizeof(content), "public interface");
@@ -1963,22 +2028,39 @@ static void relay_terminal_draw_split(int width, int height,
                 "%s", definition->display_name);
             (void)tb_printf(divider_x + 2, 7, TB_WHITE, TB_DEFAULT, "id: %llu",
                 (unsigned long long)focused->id);
-            if (focused->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
+            if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_TIMER) {
+                char intervals[64];
+
                 relay_terminal_draw_text(divider_x + 2, 9, TB_YELLOW | TB_BOLD,
-                    "Clocking Wizard");
+                    "Timer");
                 relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,
-                    "signal: Clock");
+                    "output: Trigger");
                 (void)tb_printf(divider_x + 2, 11, TB_WHITE, TB_DEFAULT,
-                    "period: %lld ticks", (long long)focused->clock_period);
-                relay_terminal_draw_text(divider_x + 2, 12, TB_WHITE,
-                    "rates: 2 4 8 16 32 64 128");
+                    "interval: %lld seconds",
+                    (long long)(focused->timer_interval_steps /
+                        RELAY_GAME_SIMULATION_STEPS_PER_SECOND));
+                relay_terminal_timer_intervals(intervals, sizeof(intervals));
+                relay_terminal_draw_text(divider_x + 2, 12, TB_WHITE, intervals);
                 relay_terminal_draw_text(divider_x + 2, 13, TB_YELLOW,
-                    "[ / ] change period");
-            } else if (focused->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
+                    "[ / ] change interval");
+            } else if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
+                const Relay_NodeSimulationDefinition *simulation =
+                    &definition->simulation;
+                const Relay_NodePortDefinition *source_output =
+                    &definition->outputs[simulation->output_port_index];
+
                 (void)tb_printf(divider_x + 2, 9, TB_WHITE, TB_DEFAULT,
-                    "fuel coal: %lld", (long long)focused->fuel_coal);
+                    "output: %s", source_output->display_name);
                 (void)tb_printf(divider_x + 2, 10, TB_WHITE, TB_DEFAULT,
-                    "progress: %lld / 16", (long long)focused->progress);
+                    "rate: %lld / second",
+                    (long long)simulation->output_amount);
+                (void)tb_printf(divider_x + 2, 11, TB_WHITE, TB_DEFAULT,
+                    "progress: %lld / %u", (long long)focused->progress,
+                    simulation->interval_steps);
+                (void)tb_printf(divider_x + 2, 12, TB_WHITE, TB_DEFAULT,
+                    "produced: %lld", (long long)focused->produced);
             } else if (focused->runtime_kind ==
                     RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
                 relay_terminal_draw_text(divider_x + 2, 9, TB_CYAN | TB_BOLD,

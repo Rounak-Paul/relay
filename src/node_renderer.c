@@ -8,7 +8,7 @@ Relay_NodeVisual relay_node_renderer_visual(const Relay_Node *node)
     if (definition == NULL) {
         return (Relay_NodeVisual){"??", 1};
     }
-    if (definition->id == RELAY_NODE_DEFINITION_CLOCK) {
+    if (definition->simulation.behavior == RELAY_NODE_BEHAVIOR_TIMER) {
         return (Relay_NodeVisual){definition->glyph, 3};
     }
     if (node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY ||
@@ -24,7 +24,7 @@ Relay_NodeVisual relay_node_renderer_visual(const Relay_Node *node)
 Relay_NodeVisual relay_node_renderer_port_visual(Relay_NodePortType type)
 {
     switch (type) {
-    case RELAY_NODE_PORT_TYPE_CLOCK:
+    case RELAY_NODE_PORT_TYPE_TRIGGER:
         return (Relay_NodeVisual){"●", 3};
     case RELAY_NODE_PORT_TYPE_COAL:
         return (Relay_NodeVisual){"●", 1};

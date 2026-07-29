@@ -33,9 +33,14 @@ typedef enum Relay_GameInput {
     RELAY_GAME_INPUT_CONFIRM,
     RELAY_GAME_INPUT_TOGGLE_MAP,
     RELAY_GAME_INPUT_TOGGLE_PANEL_TAB,
-    RELAY_GAME_INPUT_PREVIOUS_CLOCK_RATE,
-    RELAY_GAME_INPUT_NEXT_CLOCK_RATE
+    RELAY_GAME_INPUT_PREVIOUS_TIMER_INTERVAL,
+    RELAY_GAME_INPUT_NEXT_TIMER_INTERVAL
 } Relay_GameInput;
+
+enum {
+    RELAY_GAME_SIMULATION_STEPS_PER_SECOND = 60,
+    RELAY_GAME_MAX_CATCH_UP_STEPS = 8
+};
 
 /** Results from shop and menu actions exposed for UI and scripting feedback. */
 typedef enum Relay_GameActionResult {
@@ -75,7 +80,7 @@ typedef struct Relay_Game {
     Relay_NodeId root_focused_node_id;
     size_t active_workspace;
     Relay_BlueprintId editing_blueprint_id;
-    uint64_t simulation_tick;
+    uint64_t simulation_step;
 } Relay_Game;
 
 /** Initialize the node world and starting currency. */
@@ -173,7 +178,7 @@ bool relay_game_connect_nodes(Relay_Game *game, Relay_NodeId source_node_id,
     size_t source_port_index, Relay_NodeId destination_node_id,
     size_t destination_port_index);
 
-/** Advance the root module by one fixed 60 Hz gameplay tick. */
+/** Advance the root module by one deterministic fixed simulation step. */
 bool relay_game_step(Relay_Game *game);
 
 /** Leave a nested workspace mode, returning true when one was left. */

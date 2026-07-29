@@ -55,13 +55,16 @@ and opened. Unsafe base globals and unordered table iteration are removed.
 Lua is syntax and execution infrastructure, not a second simulation.
 `src/script_runtime.c` compiles each module in an isolated environment, enforces
 integer-only source rules and deterministic instruction/memory limits, then
-invokes it with a read-only fixed-tick input snapshot. Each placed module owns a
+invokes it with a read-only activation snapshot. Each placed module owns a
 bounded scalar state table; state and outputs commit only after a successful
 invocation. Lua headers and state pointers remain private and gameplay-facing
-values stay project-owned.
+values stay project-owned. Script interfaces use the immutable `Type` enum
+namespace (`Type.TRIGGER`, material types, `Type.BOOLEAN`, and `Type.INTEGER`);
+the enum is built from one runtime registry and lowercase string type
+declarations are not part of the language.
 
 `src/blueprint.c` owns stable player Blueprint IDs, dotted keys, source
-revisions, typed schemas, compiled artifacts, boundary/core definitions,
+revisions, typed schemas, compiled artifacts, boundary/process definitions,
 top-level architecture scenes, and immutable flattened plans. Every scene owns
 `Module Inputs` and `Module Outputs`; only actual built-in or nested components
 appear between them. The Blueprint's Lua function is an implicit internal
@@ -69,19 +72,26 @@ process and never renders as a self-component. Compilation validates dependency
 acyclicity, recursively flattens child plans, and records external input fan-out
 and output-source bindings. Instantiation transactionally creates one visible
 wrapper plus private implementation nodes with Blueprint/node provenance.
-Runtime execution remains one graph and one previous-tick wire model, never a
+Runtime execution remains one graph and one previous-step wire model, never a
 nested or scripting-only simulator.
 
-The source buffer contains a canonical `relay architecture` region with stable
-component declarations, layout, and VHDL-style port maps. Successful graph
-component creation, connection replacement, and movement regenerate this region
-and recompile the artifact and plan transactionally. `:w` parses the same region
-back into a candidate scene, resolves stable definition and port keys, validates
-it through `Relay_NodeWorld`, and swaps source, scene, artifact, and plan only as
-one successful deployment.
+The source buffer contains ordinary top-level Lua-shaped architecture
+declarations: `local component = instance(...)` plus typed `connect(...)` port
+maps through module `inputs`/`outputs` and component `.inputs`/`.outputs`
+namespaces. The Blueprint compiler blanks these declarative lines from the Lua
+runtime chunk while preserving diagnostic line numbers; the architecture parser
+owns them. `on_process(inputs, state)` is the deterministic activation observer.
+Successful graph component creation, connection replacement, and movement
+regenerate these declarations and recompile the artifact and plan
+transactionally. Regeneration canonicalizes the architecture boundary to one
+blank line before the generated declarations and one before `on_process`, so
+repeated graph edits cannot accumulate empty lines; function-body whitespace is
+preserved. `:w` parses the same declarations back into a candidate scene,
+resolves stable definition and port keys, validates it through `Relay_NodeWorld`,
+and swaps source, scene, artifact, and plan only as one successful deployment.
 
 `Relay_Game` owns workspace selection, editor commands, design-graph mutation,
-instantiation, and fixed-tick execution. Failed architecture mutations restore
+instantiation, and fixed-step execution. Failed architecture mutations restore
 the prior connection or node boundary and preserve the last valid plan. Direct
 and indirect recursive dependencies are rejected. Interface-changing
 redeployment is rejected after instances or architecture references exist,
@@ -109,23 +119,36 @@ inputs and right-side outputs without source-specific branches.
 instances and typed directed connections. A connection is an output port to one
 input port; replacing an input's wire is deliberate, and exact compatibility is
 validated centrally through fixed `Relay_NodePortType` values. Port types are
-separate from property scalar types: Clock, Coal, Iron Ore, Copper Ore, Stone,
+separate from property scalar types: Trigger, Coal, Iron Ore, Copper Ore, Stone,
 Boolean, Integer, and Text are semantic graph channels. This graph contract is
 the implemented boundary for built-in reusable modules and script-authored
 VHDL-like modules. Scripting uses stable node IDs, port indexes, and property
 APIs rather than terminal coordinates or mutable storage.
 
-The initial graph starts with one Coal Miner. The Shop sells Clock modules. A
-Clock emits its `Clock` signal at one of the valid periods (2 through 128 fixed ticks),
-and the Coal Miner consumes one Coal fuel plus 16 connected pulses to produce
-one Coal. The initial miner has one bootstrap fuel item; players can feed its
-Coal output back to its Fuel input through a permitted self-connection. Each
-tick snapshots prior outputs before evaluating the graph, so a self-fed coal
-item becomes fuel on the following tick rather than recursively duplicating in
-one simulation step. `Relay_App` uses a monotonic accumulator and executes
-gameplay at a fixed 60 Hz; rendering and terminal input never determine
-simulation progress. Progress and output state stay on the node instance and
-are exposed through script-stable property keys.
+The initial graph starts with one Coal Miner. Coal, Iron, Copper, and Stone
+miners use the same `RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE` executor and differ
+only through immutable `Relay_NodeDefinition` data: stable identity, output
+schema, interval, output port, and quantity. Each has no inputs and emits one
+typed resource every 60 simulation steps while enabled. Runtime progress and
+lifetime production are Inspector state rather than script properties.
+`node.enabled` is the universal script-visible Boolean property on every
+built-in and Blueprint-owned node; it is the only script-visible property on
+miners. Disabling a Blueprint wrapper pauses every flattened internal node and
+suppresses the wrapper outputs; re-enabling it resumes retained progress and
+script state. New source definitions therefore require no simulation or
+terminal branch.
+
+The Shop sells optional Timer modules. A Timer emits a transient typed Trigger
+at a configurable 1, 2, 4, 8, or 16 second interval for script and control
+activation. Trigger and material values are one-step deliveries; Boolean,
+integer, and text values are retained levels. Blueprint `on_process` observers
+initialize once, then run only for nonzero transient inputs or changed level
+inputs. `Relay_App` uses a monotonic accumulator and executes simulation at a
+fixed 60 Hz independently of rendering. Each outer-loop iteration performs at
+most eight catch-up steps and retains remaining simulation debt, so slow
+presentation never silently discards authoritative steps. While debt remains,
+normal simulation redraws are skipped so processing catches up before presenting
+the next graph state.
 
 ## Workspace renderer boundary
 
@@ -153,8 +176,9 @@ half of an output row, rather than a single connector glyph. A wire may begin
 from either side; terminal input normalizes that interaction to one output-to-
 input graph connection before the game validates it.
 `relay_node_renderer_port_visual` owns the terminal-agnostic type color token,
-which both terminal backends apply to the port glyphs. Clock ports are cyan and
-Coal ports are amber, so the visual language mirrors the graph's exact type rule.
+which both terminal backends apply to the port glyphs. Trigger, Coal, Iron Ore,
+Copper Ore, and Stone have distinct colors, so the visual language mirrors the
+graph's exact type rule.
 
 `Relay_Game.workspace_mode` owns the graph/map workspace state and
 `focused_node_id` records the active node for inspection as well as the last node
@@ -164,8 +188,8 @@ and activates the Inspector.
 `Relay_Game.active_tab` owns the Shop/Inspector/Scripts choice. Tab cycles the
 wider right-side control panel, while mouse hit testing selects the exact tab
 clicked. The Inspector reads the immutable
-definition and script-visible node properties; a focused Clock presents its
-Clocking Wizard configuration and valid period set without a parallel UI-only
+definition and script-visible node properties; a focused Timer presents its
+interval configuration and valid duration set without a parallel UI-only
 configuration model. `m` toggles the compact map renderer;
 Escape is a universal Back request, returning map view to graph view before the
 application opens its centered exit-confirmation overlay. Only Enter confirms

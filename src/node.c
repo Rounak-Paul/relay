@@ -5,52 +5,124 @@
 #include <stdlib.h>
 #include <string.h>
 
-/** Script schema for the player-controlled infinite clock. */
-static const Relay_NodePropertyDefinition relay_clock_properties[] = {
+static const int64_t relay_timer_intervals[] = {60, 120, 240, 480, 960};
+
+/** Script schema implemented by every node instance. */
+static const Relay_NodePropertyDefinition relay_universal_properties[] = {
+    {"node.enabled", RELAY_NODE_VALUE_BOOLEAN, true, {.boolean = true}}
+};
+
+/** Script schema for the optional deterministic timer. */
+static const Relay_NodePropertyDefinition relay_timer_properties[] = {
     {"node.enabled", RELAY_NODE_VALUE_BOOLEAN, true, {.boolean = true}},
-    {"clock.period", RELAY_NODE_VALUE_INTEGER, true, {.integer = 2}},
-    {"clock.pulses", RELAY_NODE_VALUE_INTEGER, false, {.integer = 0}}
+    {"timer.interval_steps", RELAY_NODE_VALUE_INTEGER, true,
+        {.integer = RELAY_TIMER_DEFAULT_INTERVAL_STEPS}},
+    {"timer.triggers", RELAY_NODE_VALUE_INTEGER, false, {.integer = 0}}
 };
 
-/** Script schema for a coal miner driven by a clock signal. */
-static const Relay_NodePropertyDefinition relay_coal_miner_properties[] = {
-    {"node.enabled", RELAY_NODE_VALUE_BOOLEAN, true, {.boolean = true}},
-    {"process.required_clock", RELAY_NODE_VALUE_INTEGER, false, {.integer = 16}},
-    {"process.progress", RELAY_NODE_VALUE_INTEGER, false, {.integer = 0}},
-    {"fuel.coal", RELAY_NODE_VALUE_INTEGER, false, {.integer = 0}},
-    {"resource.coal", RELAY_NODE_VALUE_INTEGER, false, {.integer = 0}}
-};
-
-/** Ports for the player-controlled infinite clock resource. */
-static const Relay_NodePortDefinition relay_clock_outputs[] = {
-    {"clock", "Clock", RELAY_NODE_PORT_TYPE_CLOCK}
-};
-
-/** Ports for a coal miner that consumes clock pulses. */
-static const Relay_NodePortDefinition relay_coal_miner_inputs[] = {
-    {"clock", "Clock", RELAY_NODE_PORT_TYPE_CLOCK},
-    {"fuel", "Fuel", RELAY_NODE_PORT_TYPE_COAL}
+/** Event output emitted by the optional deterministic timer. */
+static const Relay_NodePortDefinition relay_timer_outputs[] = {
+    {"trigger", "Trigger", RELAY_NODE_PORT_TYPE_TRIGGER}
 };
 
 static const Relay_NodePortDefinition relay_coal_miner_outputs[] = {
     {"coal", "Coal", RELAY_NODE_PORT_TYPE_COAL}
 };
 
+static const Relay_NodePortDefinition relay_iron_miner_outputs[] = {
+    {"iron_ore", "Iron Ore", RELAY_NODE_PORT_TYPE_IRON_ORE}
+};
+
+static const Relay_NodePortDefinition relay_copper_miner_outputs[] = {
+    {"copper_ore", "Copper Ore", RELAY_NODE_PORT_TYPE_COPPER_ORE}
+};
+
+static const Relay_NodePortDefinition relay_stone_miner_outputs[] = {
+    {"stone", "Stone", RELAY_NODE_PORT_TYPE_STONE}
+};
+
 /** Immutable built-in module catalog with script-stable identifiers and keys. */
 static const Relay_NodeDefinition relay_node_definitions[] = {
-    {RELAY_NODE_DEFINITION_CLOCK, "source.clock", "Clock", "◷",
-        "An infinite, configurable clock source.", RELAY_NODE_CATEGORY_SOURCE,
-        NULL, 0, relay_clock_outputs, sizeof(relay_clock_outputs) /
-            sizeof(relay_clock_outputs[0]), relay_clock_properties,
-        sizeof(relay_clock_properties) / sizeof(relay_clock_properties[0])},
-    {RELAY_NODE_DEFINITION_COAL_MINER, "process.coal_miner", "Coal Miner", "◆",
-        "Consumes sixteen clock pulses to produce one coal.",
-        RELAY_NODE_CATEGORY_PROCESSOR, relay_coal_miner_inputs,
-        sizeof(relay_coal_miner_inputs) / sizeof(relay_coal_miner_inputs[0]),
-        relay_coal_miner_outputs, sizeof(relay_coal_miner_outputs) /
-            sizeof(relay_coal_miner_outputs[0]), relay_coal_miner_properties,
-        sizeof(relay_coal_miner_properties) /
-            sizeof(relay_coal_miner_properties[0])}
+    {
+        .id = RELAY_NODE_DEFINITION_TIMER,
+        .key = "control.timer",
+        .display_name = "Timer",
+        .glyph = "◷",
+        .description = "Emits an optional periodic trigger.",
+        .category = RELAY_NODE_CATEGORY_SOURCE,
+        .outputs = relay_timer_outputs,
+        .output_count = sizeof(relay_timer_outputs) /
+            sizeof(relay_timer_outputs[0]),
+        .properties = relay_timer_properties,
+        .property_count = sizeof(relay_timer_properties) /
+            sizeof(relay_timer_properties[0]),
+        .simulation = {RELAY_NODE_BEHAVIOR_TIMER,
+            RELAY_TIMER_DEFAULT_INTERVAL_STEPS, 0, 1}
+    },
+    {
+        .id = RELAY_NODE_DEFINITION_COAL_MINER,
+        .key = "source.coal_miner",
+        .display_name = "Coal Miner",
+        .glyph = "◆",
+        .description = "Produces one Coal each second while enabled.",
+        .category = RELAY_NODE_CATEGORY_SOURCE,
+        .outputs = relay_coal_miner_outputs,
+        .output_count = sizeof(relay_coal_miner_outputs) /
+            sizeof(relay_coal_miner_outputs[0]),
+        .properties = relay_universal_properties,
+        .property_count = sizeof(relay_universal_properties) /
+            sizeof(relay_universal_properties[0]),
+        .simulation = {RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE,
+            RELAY_SOURCE_MINER_INTERVAL_STEPS, 0, 1}
+    },
+    {
+        .id = RELAY_NODE_DEFINITION_IRON_MINER,
+        .key = "source.iron_miner",
+        .display_name = "Iron Miner",
+        .glyph = "◆",
+        .description = "Produces one Iron Ore each second while enabled.",
+        .category = RELAY_NODE_CATEGORY_SOURCE,
+        .outputs = relay_iron_miner_outputs,
+        .output_count = sizeof(relay_iron_miner_outputs) /
+            sizeof(relay_iron_miner_outputs[0]),
+        .properties = relay_universal_properties,
+        .property_count = sizeof(relay_universal_properties) /
+            sizeof(relay_universal_properties[0]),
+        .simulation = {RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE,
+            RELAY_SOURCE_MINER_INTERVAL_STEPS, 0, 1}
+    },
+    {
+        .id = RELAY_NODE_DEFINITION_COPPER_MINER,
+        .key = "source.copper_miner",
+        .display_name = "Copper Miner",
+        .glyph = "◆",
+        .description = "Produces one Copper Ore each second while enabled.",
+        .category = RELAY_NODE_CATEGORY_SOURCE,
+        .outputs = relay_copper_miner_outputs,
+        .output_count = sizeof(relay_copper_miner_outputs) /
+            sizeof(relay_copper_miner_outputs[0]),
+        .properties = relay_universal_properties,
+        .property_count = sizeof(relay_universal_properties) /
+            sizeof(relay_universal_properties[0]),
+        .simulation = {RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE,
+            RELAY_SOURCE_MINER_INTERVAL_STEPS, 0, 1}
+    },
+    {
+        .id = RELAY_NODE_DEFINITION_STONE_MINER,
+        .key = "source.stone_miner",
+        .display_name = "Stone Miner",
+        .glyph = "◆",
+        .description = "Produces one Stone each second while enabled.",
+        .category = RELAY_NODE_CATEGORY_SOURCE,
+        .outputs = relay_stone_miner_outputs,
+        .output_count = sizeof(relay_stone_miner_outputs) /
+            sizeof(relay_stone_miner_outputs[0]),
+        .properties = relay_universal_properties,
+        .property_count = sizeof(relay_universal_properties) /
+            sizeof(relay_universal_properties[0]),
+        .simulation = {RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE,
+            RELAY_SOURCE_MINER_INTERVAL_STEPS, 0, 1}
+    }
 };
 
 /** Grow node storage to accept one more world instance. */
@@ -139,6 +211,40 @@ static const Relay_NodePropertyDefinition *relay_node_property_definition_find(
     return NULL;
 }
 
+/** Validate a definition's storage and executable simulation contract. */
+static bool relay_node_definition_valid(const Relay_NodeDefinition *definition)
+{
+    const Relay_NodeSimulationDefinition *simulation;
+    const Relay_NodePropertyDefinition *enabled_property;
+
+    if (definition == NULL || definition->id == 0 || definition->key == NULL ||
+        definition->display_name == NULL || definition->glyph == NULL ||
+        definition->description == NULL ||
+        definition->input_count > RELAY_NODE_MAX_PORTS ||
+        definition->output_count > RELAY_NODE_MAX_PORTS ||
+        (definition->input_count > 0 && definition->inputs == NULL) ||
+        (definition->output_count > 0 && definition->outputs == NULL) ||
+        (definition->property_count > 0 && definition->properties == NULL)) {
+        return false;
+    }
+    enabled_property = relay_node_property_definition_find(definition,
+        "node.enabled");
+    if (enabled_property == NULL ||
+        enabled_property->value_type != RELAY_NODE_VALUE_BOOLEAN ||
+        !enabled_property->writable) {
+        return false;
+    }
+    simulation = &definition->simulation;
+    if (simulation->behavior == RELAY_NODE_BEHAVIOR_NONE) {
+        return true;
+    }
+    return (simulation->behavior == RELAY_NODE_BEHAVIOR_TIMER ||
+            simulation->behavior == RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) &&
+        simulation->interval_steps > 0 &&
+        simulation->output_port_index < definition->output_count &&
+        simulation->output_amount > 0;
+}
+
 bool relay_node_world_init(Relay_NodeWorld *world)
 {
     if (world == NULL) {
@@ -162,9 +268,7 @@ Relay_NodeId relay_node_world_create_definition(Relay_NodeWorld *world,
     Relay_Node *node;
     Relay_NodeId id;
 
-    if (world == NULL || definition == NULL ||
-        definition->input_count > RELAY_NODE_MAX_PORTS ||
-        definition->output_count > RELAY_NODE_MAX_PORTS ||
+    if (world == NULL || !relay_node_definition_valid(definition) ||
         !relay_node_world_grow(world)) {
         return 0;
     }
@@ -184,9 +288,10 @@ Relay_NodeId relay_node_world_create_definition(Relay_NodeWorld *world,
         (unsigned long long)id);
     node->grid_x = grid_x;
     node->grid_y = grid_y;
-    node->clock_period = 2;
+    node->timer_interval_steps =
+        definition->simulation.behavior == RELAY_NODE_BEHAVIOR_TIMER ?
+        definition->simulation.interval_steps : 0;
     node->enabled = true;
-    node->fuel_coal = definition->id == RELAY_NODE_DEFINITION_COAL_MINER ? 1 : 0;
     return id;
 }
 
@@ -243,7 +348,7 @@ bool relay_node_world_move(Relay_NodeWorld *world, Relay_NodeId id,
 const char *relay_node_port_type_name(Relay_NodePortType type)
 {
     switch (type) {
-    case RELAY_NODE_PORT_TYPE_CLOCK: return "Clock";
+    case RELAY_NODE_PORT_TYPE_TRIGGER: return "Trigger";
     case RELAY_NODE_PORT_TYPE_COAL: return "Coal";
     case RELAY_NODE_PORT_TYPE_IRON_ORE: return "Iron Ore";
     case RELAY_NODE_PORT_TYPE_COPPER_ORE: return "Copper Ore";
@@ -262,6 +367,15 @@ bool relay_node_port_types_compatible(Relay_NodePortType source_type,
 {
     return source_type != RELAY_NODE_PORT_TYPE_INVALID &&
         source_type == destination_type;
+}
+
+bool relay_node_port_type_is_transient(Relay_NodePortType type)
+{
+    return type == RELAY_NODE_PORT_TYPE_TRIGGER ||
+        type == RELAY_NODE_PORT_TYPE_COAL ||
+        type == RELAY_NODE_PORT_TYPE_IRON_ORE ||
+        type == RELAY_NODE_PORT_TYPE_COPPER_ORE ||
+        type == RELAY_NODE_PORT_TYPE_STONE;
 }
 
 bool relay_node_world_connect(Relay_NodeWorld *world, Relay_NodeId source_node_id,
@@ -466,6 +580,27 @@ const Relay_NodeDefinition *relay_node_definition_at(size_t index)
         NULL;
 }
 
+const Relay_NodePropertyDefinition *relay_node_universal_properties(
+    size_t *count)
+{
+    if (count != NULL) {
+        *count = sizeof(relay_universal_properties) /
+            sizeof(relay_universal_properties[0]);
+    }
+    return relay_universal_properties;
+}
+
+size_t relay_timer_interval_count(void)
+{
+    return sizeof(relay_timer_intervals) / sizeof(relay_timer_intervals[0]);
+}
+
+int64_t relay_timer_interval_at(size_t index)
+{
+    return index < relay_timer_interval_count() ?
+        relay_timer_intervals[index] : 0;
+}
+
 bool relay_node_property_get(const Relay_Node *node, const char *key,
     Relay_NodeValue *value, Relay_NodeValueType *value_type)
 {
@@ -484,15 +619,10 @@ bool relay_node_property_get(const Relay_Node *node, const char *key,
     *value = property->default_value;
     if (strcmp(key, "node.enabled") == 0) {
         value->boolean = node->enabled;
-    } else if (strcmp(key, "clock.period") == 0) {
-        value->integer = node->clock_period;
-    } else if (strcmp(key, "clock.pulses") == 0 ||
-        strcmp(key, "resource.coal") == 0) {
+    } else if (strcmp(key, "timer.interval_steps") == 0) {
+        value->integer = node->timer_interval_steps;
+    } else if (strcmp(key, "timer.triggers") == 0) {
         value->integer = node->produced;
-    } else if (strcmp(key, "process.progress") == 0) {
-        value->integer = node->progress;
-    } else if (strcmp(key, "fuel.coal") == 0) {
-        value->integer = node->fuel_coal;
     }
     return true;
 }
@@ -502,6 +632,7 @@ bool relay_node_property_set(Relay_Node *node, const char *key,
 {
     const Relay_NodeDefinition *definition;
     const Relay_NodePropertyDefinition *property;
+    size_t index;
 
     if (node == NULL || key == NULL) {
         return false;
@@ -516,12 +647,14 @@ bool relay_node_property_set(Relay_Node *node, const char *key,
         node->enabled = value.boolean;
         return true;
     }
-    if (strcmp(key, "clock.period") == 0 && (value.integer == 2 ||
-            value.integer == 4 || value.integer == 8 || value.integer == 16 ||
-            value.integer == 32 || value.integer == 64 || value.integer == 128)) {
-        node->clock_period = value.integer;
-        node->clock_phase = 0;
-        return true;
+    if (strcmp(key, "timer.interval_steps") == 0) {
+        for (index = 0; index < relay_timer_interval_count(); index++) {
+            if (value.integer == relay_timer_interval_at(index)) {
+                node->timer_interval_steps = value.integer;
+                node->timer_elapsed_steps = 0;
+                return true;
+            }
+        }
     }
     return false;
 }

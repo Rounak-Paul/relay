@@ -20,13 +20,68 @@ static Relay_Node *relay_test_visible_node(Relay_NodeWorld *world,
     return NULL;
 }
 
+/** Verify scene synchronization keeps one canonical architecture separator. */
+static bool relay_test_compact_architecture_source(void)
+{
+    static const char expected_created[] =
+        "input(\"trigger\", Type.TRIGGER)\n"
+        "output(\"trigger_out\", Type.TRIGGER)\n"
+        "\n"
+        "local n3 = instance(\"source.coal_miner\", { x = 90, y = 0 })\n"
+        "\n"
+        "function on_process(inputs, state)\n"
+        "  state.activations = (state.activations or 0) + 1\n"
+        "  return { trigger_out = inputs.trigger or 0 }\n"
+        "end\n";
+    static const char expected_moved[] =
+        "input(\"trigger\", Type.TRIGGER)\n"
+        "output(\"trigger_out\", Type.TRIGGER)\n"
+        "\n"
+        "local n3 = instance(\"source.coal_miner\", { x = 95, y = 0 })\n"
+        "\n"
+        "function on_process(inputs, state)\n"
+        "  state.activations = (state.activations or 0) + 1\n"
+        "  return { trigger_out = inputs.trigger or 0 }\n"
+        "end\n";
+    Relay_ScriptRuntime scripts = {0};
+    Relay_Game game = {0};
+    Relay_Blueprint *blueprint;
+    Relay_NodeId miner_id;
+    bool valid = false;
+
+    if (!relay_script_runtime_init(&scripts,
+            RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT) ||
+        !relay_game_init(&game, &scripts) ||
+        !relay_game_create_blueprint(&game) ||
+        !relay_game_select_panel_tab(&game, RELAY_GAME_PANEL_TAB_SHOP) ||
+        relay_game_handle_input(&game, RELAY_GAME_INPUT_NEXT) !=
+            RELAY_GAME_ACTION_NONE ||
+        relay_game_handle_input(&game, RELAY_GAME_INPUT_CONFIRM) !=
+            RELAY_GAME_ACTION_PURCHASED) {
+        goto cleanup;
+    }
+    blueprint = relay_game_active_blueprint(&game);
+    miner_id = game.focused_node_id;
+    if (blueprint == NULL || strcmp(blueprint->source, expected_created) != 0 ||
+        !relay_game_move_node(&game, miner_id, 5, 0) ||
+        strcmp(blueprint->source, expected_moved) != 0) {
+        goto cleanup;
+    }
+    valid = true;
+
+cleanup:
+    relay_game_shutdown(&game);
+    relay_script_runtime_shutdown(&scripts);
+    return valid;
+}
+
 /** Verify nested visual port maps compile and execute as one typed module. */
 int relay_blueprint_test(void)
 {
     static const char incompatible_source[] =
-        "input('coal', 'coal')\n"
-        "output('coal_out', 'coal')\n"
-        "function tick(inputs, state)\n"
+        "input('coal', Type.COAL)\n"
+        "output('coal_out', Type.COAL)\n"
+        "function on_process(inputs, state)\n"
         "  return { coal_out = inputs.coal or 0 }\n"
         "end\n";
     Relay_ScriptRuntime scripts = {0};
@@ -42,14 +97,17 @@ int relay_blueprint_test(void)
     Relay_Node *miner;
     Relay_Node *module_one;
     Relay_Node *module_two;
-    Relay_Node *clock;
+    Relay_Node *timer;
+    Relay_NodeValue enabled_value;
     uint64_t deployed_revision;
     size_t deployed_plan_nodes;
     size_t output_connection_index = SIZE_MAX;
     size_t index;
-    size_t initialized_cores = 0;
+    size_t initialized_processes = 0;
+    bool activation_counts_valid = true;
 
-    if (!relay_script_runtime_init(&scripts,
+    if (!relay_test_compact_architecture_source() ||
+        !relay_script_runtime_init(&scripts,
             RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT) ||
         !relay_game_init(&game, &scripts) ||
         !relay_game_create_blueprint(&game)) {
@@ -93,20 +151,22 @@ int relay_blueprint_test(void)
         return 1;
     }
     if (strstr(parent->source,
-            "-- component n3 : blueprint.script_1 at (90, 0)") == NULL ||
+            "local n3 = instance(\"blueprint.script_1\", { x = 90, y = 0 })") ==
+            NULL ||
         strstr(parent->source,
-            "-- port map input.clock => n3.clock") == NULL ||
+            "connect(inputs.trigger, n3.inputs.trigger)") == NULL ||
         strstr(parent->source,
-            "-- port map n3.clock_out => output.clock_out") == NULL ||
+            "connect(n3.outputs.trigger_out, outputs.trigger_out)") == NULL ||
         !relay_game_move_node(&game, child_component_id, 5, 0) ||
         strstr(parent->source,
-            "-- component n3 : blueprint.script_1 at (95, 0)") == NULL) {
+            "local n3 = instance(\"blueprint.script_1\", { x = 95, y = 0 })") ==
+            NULL) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
     }
     {
-        char *layout = strstr(parent->source, "at (95, 0)");
+        char *layout = strstr(parent->source, "x = 95, y = 0");
 
         if (layout == NULL) {
             relay_game_shutdown(&game);
@@ -128,7 +188,7 @@ int relay_blueprint_test(void)
     }
     {
         char *port_map = strstr(parent->source,
-            "-- port map n3.clock_out");
+            "connect(n3.outputs.trigger_out");
         const uint64_t valid_revision = parent->compiled_revision;
 
         if (port_map == NULL) {
@@ -136,7 +196,7 @@ int relay_blueprint_test(void)
             relay_script_runtime_shutdown(&scripts);
             return 1;
         }
-        port_map[15] = 'x';
+        port_map[19] = 'x';
         parent->revision++;
         parent->dirty = true;
         if (relay_blueprint_compile(&game.blueprints, parent) ||
@@ -148,7 +208,7 @@ int relay_blueprint_test(void)
             relay_script_runtime_shutdown(&scripts);
             return 1;
         }
-        port_map[15] = 'c';
+        port_map[19] = 't';
         parent->revision++;
         if (!relay_blueprint_compile(&game.blueprints, parent)) {
             relay_game_shutdown(&game);
@@ -227,20 +287,20 @@ int relay_blueprint_test(void)
     miner = relay_test_visible_node(root, RELAY_NODE_DEFINITION_COAL_MINER, 0);
     module_one = relay_node_world_find(root, module_one_id);
     module_two = relay_node_world_find(root, module_two_id);
-    clock = relay_test_visible_node(root, RELAY_NODE_DEFINITION_CLOCK, 0);
+    timer = relay_test_visible_node(root, RELAY_NODE_DEFINITION_TIMER, 0);
     if (miner == NULL || module_one == NULL || module_two == NULL ||
-        clock == NULL || root->module_input_binding_count != 4 ||
+        timer == NULL || root->module_input_binding_count != 4 ||
         root->module_output_binding_count != 2 ||
         relay_game_connect_nodes(&game, miner->id, 0, module_one->id, 0) ||
-        !relay_game_connect_nodes(&game, clock->id, 0, module_one->id, 0) ||
-        !relay_game_connect_nodes(&game, clock->id, 0, module_two->id, 0) ||
-        !relay_game_connect_nodes(&game, module_one->id, 0, miner->id, 0) ||
-        !relay_game_connect_nodes(&game, miner->id, 0, miner->id, 1)) {
+        !relay_game_connect_nodes(&game, timer->id, 0, module_one->id, 0) ||
+        !relay_game_connect_nodes(&game, timer->id, 0, module_two->id, 0) ||
+        relay_game_connect_nodes(&game, module_one->id, 0, miner->id, 0) ||
+        relay_game_connect_nodes(&game, miner->id, 0, miner->id, 0)) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
     }
-    for (index = 0; index < 48; index++) {
+    for (index = 0; index < 65; index++) {
         if (!relay_game_step(&game)) {
             relay_game_shutdown(&game);
             relay_script_runtime_shutdown(&scripts);
@@ -253,13 +313,48 @@ int relay_blueprint_test(void)
             root->nodes[index].runtime_kind ==
                 RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS &&
             root->nodes[index].script_state.initialized) {
-            initialized_cores++;
+            initialized_processes++;
+            if (root->nodes[index].process_activations != 2) {
+                activation_counts_valid = false;
+            }
         }
     }
-    if (miner->produced < 1 || initialized_cores != 4) {
+    if (miner->produced < 1 || initialized_processes != 4 ||
+        !activation_counts_valid || module_one->output_values[0] != 0 ||
+        module_two->output_values[0] != 0) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
+    }
+    enabled_value.boolean = false;
+    if (!relay_node_property_set(module_one, "node.enabled",
+            RELAY_NODE_VALUE_BOOLEAN, enabled_value)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    for (index = 0; index < RELAY_TIMER_DEFAULT_INTERVAL_STEPS; index++) {
+        if (!relay_game_step(&game)) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
+    for (index = 0; index < root->count; index++) {
+        const Relay_Node *node = &root->nodes[index];
+
+        if (node->runtime_kind != RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
+            continue;
+        }
+        if ((node->module_instance_id == module_one->id &&
+                (node->process_activations != 2 ||
+                    node->output_values[0] != 0)) ||
+            (node->module_instance_id == module_two->id &&
+                node->process_activations != 3)) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
     }
 
     deployed_revision = parent->compiled_revision;

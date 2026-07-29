@@ -7,23 +7,13 @@
 #include <string.h>
 
 static const char relay_blueprint_default_source[] =
-    "-- Declare the typed module interface.\n"
-    "input(\"clock\", \"clock\")\n"
-    "output(\"clock_out\", \"clock\")\n"
+    "input(\"trigger\", Type.TRIGGER)\n"
+    "output(\"trigger_out\", Type.TRIGGER)\n"
     "\n"
-    "-- relay architecture begin\n"
-    "-- relay architecture end\n"
-    "\n"
-    "-- Module behavior is an implicit process, not a visual component.\n"
-    "function tick(inputs, state)\n"
-    "  state.pulses = (state.pulses or 0) + (inputs.clock or 0)\n"
-    "  return { clock_out = inputs.clock or 0 }\n"
+    "function on_process(inputs, state)\n"
+    "  state.activations = (state.activations or 0) + 1\n"
+    "  return { trigger_out = inputs.trigger or 0 }\n"
     "end\n";
-
-static const char relay_blueprint_architecture_begin[] =
-    "-- relay architecture begin";
-static const char relay_blueprint_architecture_end[] =
-    "-- relay architecture end";
 
 static bool relay_blueprint_scene_create_system_nodes(
     Relay_Blueprint *blueprint, Relay_NodeWorld *scene);
@@ -68,6 +58,104 @@ static bool relay_blueprint_source_append(char *destination, size_t *size,
     return true;
 }
 
+/** Remove blank lines accumulated at the end of a generated source section. */
+static void relay_blueprint_source_trim_blank_tail(char *source, size_t *size)
+{
+    while (*size > 0) {
+        size_t line_end = *size;
+        size_t line_start;
+        size_t index;
+        bool blank = true;
+
+        if (source[line_end - 1] == '\n') {
+            line_end--;
+        }
+        line_start = line_end;
+        while (line_start > 0 && source[line_start - 1] != '\n') {
+            line_start--;
+        }
+        for (index = line_start; index < line_end; index++) {
+            if (!isspace((unsigned char)source[index])) {
+                blank = false;
+                break;
+            }
+        }
+        if (!blank) {
+            break;
+        }
+        *size = line_start;
+    }
+    source[*size] = '\0';
+}
+
+/** Return whether one source line is a declarative architecture statement. */
+static bool relay_blueprint_line_is_architecture(const char *line, size_t size)
+{
+    size_t index;
+
+    if (size >= 8 && strncmp(line, "connect(", 8) == 0) {
+        return true;
+    }
+    if (size < 6 || strncmp(line, "local ", 6) != 0) {
+        return false;
+    }
+    index = 6;
+    while (index < size &&
+        (isalnum((unsigned char)line[index]) || line[index] == '_')) {
+        index++;
+    }
+    while (index < size && isspace((unsigned char)line[index])) {
+        index++;
+    }
+    if (index >= size || line[index++] != '=') {
+        return false;
+    }
+    while (index < size && isspace((unsigned char)line[index])) {
+        index++;
+    }
+    return size - index >= 9 &&
+        memcmp(&line[index], "instance(", 9) == 0;
+}
+
+/** Return whether one source line begins the deterministic module handler. */
+static bool relay_blueprint_line_starts_handler(const char *line, size_t size)
+{
+    return size > 19 && strncmp(line, "function on_process", 19) == 0 &&
+        (line[19] == '(' || isspace((unsigned char)line[19]));
+}
+
+/** Blank architecture declarations while preserving Lua diagnostic line numbers. */
+static bool relay_blueprint_runtime_source(const char *source, size_t size,
+    char *runtime_source)
+{
+    size_t line_start = 0;
+    bool handler_started = false;
+
+    (void)memcpy(runtime_source, source, size);
+    runtime_source[size] = '\0';
+    while (line_start < size) {
+        size_t line_end = line_start;
+        size_t index;
+
+        while (line_end < size && source[line_end] != '\n') {
+            line_end++;
+        }
+        if (!handler_started &&
+            relay_blueprint_line_is_architecture(&source[line_start],
+                line_end - line_start)) {
+            for (index = line_start; index < line_end; index++) {
+                runtime_source[index] = ' ';
+            }
+        }
+        if (relay_blueprint_line_starts_handler(&source[line_start],
+                line_end - line_start)) {
+            handler_started = true;
+        }
+        line_start = line_end < size ? line_end + 1 : size;
+    }
+    return true;
+}
+
 /** Return one definition port key after validating its direction and index. */
 static const char *relay_blueprint_port_key(const Relay_Node *node,
     size_t port_index, bool output)
@@ -83,43 +171,12 @@ static const char *relay_blueprint_port_key(const Relay_Node *node,
         definition->inputs[port_index].key;
 }
 
-/** Write a canonical VHDL-like architecture block from the visual graph. */
-static bool relay_blueprint_source_from_scene(const Relay_Blueprint *blueprint,
-    char *candidate, size_t *candidate_size)
+/** Append canonical Lua-shaped component declarations from the visual graph. */
+static bool relay_blueprint_source_append_scene(
+    const Relay_Blueprint *blueprint, char *candidate, size_t *candidate_size)
 {
-    const char *begin = strstr(blueprint->source,
-        relay_blueprint_architecture_begin);
-    const char *end = begin == NULL ? NULL : strstr(begin,
-        relay_blueprint_architecture_end);
-    size_t prefix_size;
-    const char *suffix;
     size_t index;
 
-    if (begin != NULL && end == NULL) {
-        return false;
-    }
-    prefix_size = begin == NULL ? blueprint->source_size :
-        (size_t)(begin - blueprint->source);
-    suffix = end == NULL ? &blueprint->source[blueprint->source_size] :
-        strchr(end, '\n');
-    if (suffix == NULL) {
-        suffix = &blueprint->source[blueprint->source_size];
-    } else {
-        suffix++;
-    }
-    if (prefix_size >= RELAY_BLUEPRINT_SOURCE_CAPACITY) {
-        return false;
-    }
-    (void)memcpy(candidate, blueprint->source, prefix_size);
-    *candidate_size = prefix_size;
-    if (*candidate_size > 0 && candidate[*candidate_size - 1] != '\n' &&
-        !relay_blueprint_source_append(candidate, candidate_size, "\n")) {
-        return false;
-    }
-    if (!relay_blueprint_source_append(candidate, candidate_size,
-            "%s\n", relay_blueprint_architecture_begin)) {
-        return false;
-    }
     for (index = 0; index < blueprint->scene.count; index++) {
         const Relay_Node *node = &blueprint->scene.nodes[index];
 
@@ -131,7 +188,7 @@ static bool relay_blueprint_source_from_scene(const Relay_Blueprint *blueprint,
         }
         if (node->definition == NULL || node->local_key[0] == '\0' ||
             !relay_blueprint_source_append(candidate, candidate_size,
-                "-- component %s : %s at (%lld, %lld)\n",
+                "local %s = instance(\"%s\", { x = %lld, y = %lld })\n",
                 node->local_key, node->definition->key,
                 (long long)node->grid_x, (long long)node->grid_y)) {
             return false;
@@ -148,32 +205,116 @@ static bool relay_blueprint_source_from_scene(const Relay_Blueprint *blueprint,
             connection->source_port_index, true);
         const char *destination_port = relay_blueprint_port_key(destination,
             connection->destination_port_index, false);
-        const char *source_instance;
-        const char *destination_instance;
+        bool source_is_boundary;
+        bool destination_is_boundary;
 
         if (source == NULL || destination == NULL || source_port == NULL ||
             destination_port == NULL) {
             return false;
         }
-        source_instance = source->id == blueprint->input_boundary_node_id ?
-            "input" : source->local_key;
-        destination_instance =
-            destination->id == blueprint->output_boundary_node_id ?
-                "output" : destination->local_key;
-        if (!relay_blueprint_source_append(candidate, candidate_size,
-                "-- port map %s.%s => %s.%s\n", source_instance,
-                source_port, destination_instance, destination_port)) {
+        source_is_boundary =
+            source->id == blueprint->input_boundary_node_id;
+        destination_is_boundary =
+            destination->id == blueprint->output_boundary_node_id;
+        if (source_is_boundary && destination_is_boundary) {
+            if (!relay_blueprint_source_append(candidate, candidate_size,
+                    "connect(inputs.%s, outputs.%s)\n", source_port,
+                    destination_port)) {
+                return false;
+            }
+        } else if (source_is_boundary) {
+            if (!relay_blueprint_source_append(candidate, candidate_size,
+                    "connect(inputs.%s, %s.inputs.%s)\n", source_port,
+                    destination->local_key, destination_port)) {
+                return false;
+            }
+        } else if (destination_is_boundary) {
+            if (!relay_blueprint_source_append(candidate, candidate_size,
+                    "connect(%s.outputs.%s, outputs.%s)\n",
+                    source->local_key, source_port, destination_port)) {
+                return false;
+            }
+        } else if (!relay_blueprint_source_append(candidate, candidate_size,
+                "connect(%s.outputs.%s, %s.inputs.%s)\n",
+                source->local_key, source_port, destination->local_key,
+                destination_port)) {
             return false;
         }
     }
-    if (!relay_blueprint_source_append(candidate, candidate_size, "%s\n",
-            relay_blueprint_architecture_end)) {
-        return false;
+    return true;
+}
+
+/** Synchronize canonical top-level Lua declarations from the visual graph. */
+static bool relay_blueprint_source_from_scene(const Relay_Blueprint *blueprint,
+    char *candidate, size_t *candidate_size)
+{
+    size_t line_start = 0;
+    bool inserted = false;
+
+    *candidate_size = 0;
+    while (line_start < blueprint->source_size) {
+        size_t line_end = line_start;
+        size_t line_size;
+
+        while (line_end < blueprint->source_size &&
+            blueprint->source[line_end] != '\n') {
+            line_end++;
+        }
+        line_size = line_end - line_start;
+        if (!inserted && relay_blueprint_line_starts_handler(
+                &blueprint->source[line_start], line_size)) {
+            const size_t declaration_start = *candidate_size;
+
+            relay_blueprint_source_trim_blank_tail(candidate, candidate_size);
+            if (*candidate_size > 0 &&
+                candidate[*candidate_size - 1] != '\n' &&
+                !relay_blueprint_source_append(candidate, candidate_size,
+                    "\n")) {
+                return false;
+            }
+            if (*candidate_size > 0 &&
+                !relay_blueprint_source_append(candidate, candidate_size,
+                    "\n")) {
+                return false;
+            }
+            if (!relay_blueprint_source_append_scene(blueprint, candidate,
+                    candidate_size)) {
+                return false;
+            }
+            if (*candidate_size > declaration_start &&
+                !relay_blueprint_source_append(candidate, candidate_size,
+                    "\n")) {
+                return false;
+            }
+            inserted = true;
+        }
+        if (inserted || !relay_blueprint_line_is_architecture(
+                &blueprint->source[line_start], line_size)) {
+            if (!relay_blueprint_source_append(candidate, candidate_size,
+                    "%.*s%s", (int)line_size,
+                    &blueprint->source[line_start],
+                    line_end < blueprint->source_size ? "\n" : "")) {
+                return false;
+            }
+        }
+        line_start = line_end < blueprint->source_size ?
+            line_end + 1 : blueprint->source_size;
     }
-    if (*suffix != '\0' &&
-        !relay_blueprint_source_append(candidate, candidate_size, "%s",
-            suffix)) {
-        return false;
+    if (!inserted) {
+        relay_blueprint_source_trim_blank_tail(candidate, candidate_size);
+        if (*candidate_size > 0 &&
+            candidate[*candidate_size - 1] != '\n' &&
+            !relay_blueprint_source_append(candidate, candidate_size, "\n")) {
+            return false;
+        }
+        if (*candidate_size > 0 &&
+            !relay_blueprint_source_append(candidate, candidate_size, "\n")) {
+            return false;
+        }
+        if (!relay_blueprint_source_append_scene(blueprint, candidate,
+                candidate_size)) {
+            return false;
+        }
     }
     candidate[*candidate_size] = '\0';
     return true;
@@ -219,6 +360,11 @@ static Relay_Node *relay_blueprint_scene_find_local(Relay_NodeWorld *scene,
 /** Return whether an architecture-local component key is script-stable. */
 static bool relay_blueprint_local_key_is_valid(const char *key)
 {
+    static const char *const reserved[] = {
+        "and", "break", "do", "else", "elseif", "end", "false", "for",
+        "function", "goto", "if", "in", "local", "nil", "not", "or",
+        "repeat", "return", "then", "true", "until", "while"
+    };
     size_t index;
 
     if (key[0] == '\0' ||
@@ -227,6 +373,11 @@ static bool relay_blueprint_local_key_is_valid(const char *key)
     }
     for (index = 1; key[index] != '\0'; index++) {
         if (!(isalnum((unsigned char)key[index]) || key[index] == '_')) {
+            return false;
+        }
+    }
+    for (index = 0; index < sizeof(reserved) / sizeof(reserved[0]); index++) {
+        if (strcmp(key, reserved[index]) == 0) {
             return false;
         }
     }
@@ -256,64 +407,100 @@ static bool relay_blueprint_port_index(const Relay_Node *node,
     return false;
 }
 
-/** Parse one endpoint into an architecture instance and port key. */
-static bool relay_blueprint_endpoint_parse(const char *endpoint,
-    char *instance, size_t instance_capacity, char *port,
-    size_t port_capacity)
+/** Trim surrounding ASCII whitespace from one mutable source token. */
+static char *relay_blueprint_token_trim(char *token)
 {
-    const char *separator = strchr(endpoint, '.');
-    const size_t instance_size = separator == NULL ? 0 :
-        (size_t)(separator - endpoint);
-    const size_t port_size = separator == NULL ? 0 : strlen(separator + 1);
+    char *end;
 
-    if (separator == NULL || instance_size == 0 ||
-        instance_size >= instance_capacity || port_size == 0 ||
-        port_size >= port_capacity || strchr(separator + 1, '.') != NULL) {
+    while (isspace((unsigned char)*token)) {
+        token++;
+    }
+    end = token + strlen(token);
+    while (end > token && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    *end = '\0';
+    return token;
+}
+
+/** Parse one directional endpoint into a component key and port key. */
+static bool relay_blueprint_endpoint_parse(const char *endpoint, bool source,
+    char *instance, size_t instance_capacity, char *port,
+    size_t port_capacity, bool *boundary)
+{
+    const char *first = strchr(endpoint, '.');
+    const char *second = first == NULL ? NULL : strchr(first + 1, '.');
+    const char *expected_boundary = source ? "inputs" : "outputs";
+    const char *expected_direction = source ? "outputs" : "inputs";
+    size_t instance_size;
+    size_t port_size;
+
+    if (first == NULL || first == endpoint) {
+        return false;
+    }
+    instance_size = (size_t)(first - endpoint);
+    if (second == NULL) {
+        port_size = strlen(first + 1);
+        if (instance_size != strlen(expected_boundary) ||
+            memcmp(endpoint, expected_boundary, instance_size) != 0) {
+            return false;
+        }
+        *boundary = true;
+    } else {
+        const size_t direction_size = (size_t)(second - first - 1);
+
+        port_size = strlen(second + 1);
+        if (strchr(second + 1, '.') != NULL ||
+            direction_size != strlen(expected_direction) ||
+            memcmp(first + 1, expected_direction, direction_size) != 0) {
+            return false;
+        }
+        *boundary = false;
+        first = second;
+    }
+    if (instance_size >= instance_capacity || port_size == 0 ||
+        port_size >= port_capacity) {
         return false;
     }
     (void)memcpy(instance, endpoint, instance_size);
     instance[instance_size] = '\0';
-    (void)memcpy(port, separator + 1, port_size + 1);
-    return true;
+    (void)memcpy(port, first + 1, port_size + 1);
+    return relay_blueprint_local_key_is_valid(instance) &&
+        relay_blueprint_local_key_is_valid(port);
 }
 
-/** Rehydrate one typed visual architecture from its canonical source block. */
+/** Rehydrate one typed visual architecture from top-level declarations. */
 static bool relay_blueprint_scene_from_source(Relay_BlueprintLibrary *library,
     Relay_Blueprint *blueprint, Relay_NodeWorld *scene)
 {
-    const char *begin = strstr(blueprint->source,
-        relay_blueprint_architecture_begin);
-    const char *end = begin == NULL ? NULL : strstr(begin,
-        relay_blueprint_architecture_end);
-    const char *cursor;
+    const char *cursor = blueprint->source;
 
     if (!relay_node_world_init(scene) ||
         !relay_blueprint_scene_create_system_nodes(blueprint, scene)) {
         return false;
     }
-    if (begin == NULL) {
-        return true;
-    }
-    if (end == NULL) {
-        return false;
-    }
-    cursor = strchr(begin, '\n');
-    if (cursor == NULL) {
-        return false;
-    }
-    cursor++;
-    while (cursor < end) {
+    while (*cursor != '\0') {
         const char *line_end = strchr(cursor, '\n');
-        const size_t line_size = line_end == NULL || line_end > end ?
-            (size_t)(end - cursor) : (size_t)(line_end - cursor);
+        const size_t line_size = line_end == NULL ? strlen(cursor) :
+            (size_t)(line_end - cursor);
         char line[256];
+        char *statement;
 
         if (line_size >= sizeof(line)) {
-            return false;
+            if (relay_blueprint_line_is_architecture(cursor, line_size)) {
+                return false;
+            }
+            cursor = line_end == NULL ? cursor + line_size : line_end + 1;
+            continue;
         }
         (void)memcpy(line, cursor, line_size);
         line[line_size] = '\0';
-        if (strncmp(line, "-- component ", 13) == 0) {
+        if (relay_blueprint_line_starts_handler(cursor, line_size)) {
+            break;
+        }
+        statement = relay_blueprint_token_trim(line);
+        if (relay_blueprint_line_is_architecture(cursor, line_size) &&
+            strncmp(statement, "local ", 6) == 0) {
             char local_key[RELAY_NODE_LOCAL_KEY_CAPACITY];
             char definition_key[RELAY_BLUEPRINT_KEY_CAPACITY];
             long long grid_x;
@@ -324,12 +511,18 @@ static bool relay_blueprint_scene_from_source(Relay_BlueprintLibrary *library,
             Relay_NodeId node_id;
             Relay_Node *node;
 
-            if (sscanf(line, "-- component %31s : %63s at (%lld, %lld)%n",
+            if (sscanf(statement,
+                    "local %31s = instance(\"%63[^\"]\", { x = %lld, y = %lld })%n",
                     local_key, definition_key, &grid_x, &grid_y,
-                    &consumed) != 4 || line[consumed] != '\0' ||
+                    &consumed) != 4 || statement[consumed] != '\0' ||
                 !relay_blueprint_local_key_is_valid(local_key) ||
+                strcmp(local_key, "inputs") == 0 ||
+                strcmp(local_key, "outputs") == 0 ||
                 strcmp(local_key, "input") == 0 ||
                 strcmp(local_key, "output") == 0 ||
+                strcmp(local_key, "instance") == 0 ||
+                strcmp(local_key, "connect") == 0 ||
+                strcmp(local_key, "on_process") == 0 ||
                 relay_blueprint_scene_find_local(scene, local_key) != NULL) {
                 return false;
             }
@@ -350,7 +543,8 @@ static bool relay_blueprint_scene_from_source(Relay_BlueprintLibrary *library,
                 node->runtime_kind = RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER;
                 node->blueprint_id = child_id;
             }
-        } else if (strncmp(line, "-- port map ", 12) == 0) {
+        } else if (relay_blueprint_line_is_architecture(cursor, line_size) &&
+            strncmp(statement, "connect(", 8) == 0) {
             char source_endpoint[80];
             char destination_endpoint[80];
             char source_instance[RELAY_NODE_LOCAL_KEY_CAPACITY];
@@ -362,23 +556,29 @@ static bool relay_blueprint_scene_from_source(Relay_BlueprintLibrary *library,
             Relay_Node *destination;
             size_t source_port_index;
             size_t destination_port_index;
+            size_t connection_index;
+            bool source_is_boundary;
+            bool destination_is_boundary;
 
-            if (sscanf(line, "-- port map %79s => %79s%n",
+            if (sscanf(statement, "connect(%79[^,], %79[^)])%n",
                     source_endpoint, destination_endpoint, &consumed) != 2 ||
-                line[consumed] != '\0' ||
-                !relay_blueprint_endpoint_parse(source_endpoint,
+                statement[consumed] != '\0' ||
+                !relay_blueprint_endpoint_parse(
+                    relay_blueprint_token_trim(source_endpoint), true,
                     source_instance, sizeof(source_instance), source_port,
-                    sizeof(source_port)) ||
-                !relay_blueprint_endpoint_parse(destination_endpoint,
+                    sizeof(source_port), &source_is_boundary) ||
+                !relay_blueprint_endpoint_parse(
+                    relay_blueprint_token_trim(destination_endpoint), false,
                     destination_instance, sizeof(destination_instance),
-                    destination_port, sizeof(destination_port))) {
+                    destination_port, sizeof(destination_port),
+                    &destination_is_boundary)) {
                 return false;
             }
-            source = strcmp(source_instance, "input") == 0 ?
+            source = source_is_boundary ?
                 relay_node_world_find(scene,
                     blueprint->input_boundary_node_id) :
                 relay_blueprint_scene_find_local(scene, source_instance);
-            destination = strcmp(destination_instance, "output") == 0 ?
+            destination = destination_is_boundary ?
                 relay_node_world_find(scene,
                     blueprint->output_boundary_node_id) :
                 relay_blueprint_scene_find_local(scene,
@@ -387,15 +587,27 @@ static bool relay_blueprint_scene_from_source(Relay_BlueprintLibrary *library,
                 !relay_blueprint_port_index(source, source_port, true,
                     &source_port_index) ||
                 !relay_blueprint_port_index(destination, destination_port,
-                    false, &destination_port_index) ||
-                !relay_node_world_connect(scene, source->id, source_port_index,
+                    false, &destination_port_index)) {
+                return false;
+            }
+            for (connection_index = 0;
+                    connection_index < scene->connection_count;
+                    connection_index++) {
+                const Relay_NodeConnection *existing =
+                    &scene->connections[connection_index];
+
+                if (existing->destination_node_id == destination->id &&
+                    existing->destination_port_index ==
+                        destination_port_index) {
+                    return false;
+                }
+            }
+            if (!relay_node_world_connect(scene, source->id, source_port_index,
                     destination->id, destination_port_index)) {
                 return false;
             }
-        } else if (line[0] != '\0') {
-            return false;
         }
-        cursor = line_end == NULL ? end : line_end + 1;
+        cursor = line_end == NULL ? cursor + line_size : line_end + 1;
     }
     return true;
 }
@@ -552,8 +764,12 @@ static bool relay_blueprint_library_references(
 /** Rebuild all stable definition views from the installed public schema. */
 static void relay_blueprint_definition_refresh(Relay_Blueprint *blueprint)
 {
+    const Relay_NodePropertyDefinition *universal_properties;
+    size_t universal_property_count;
     size_t index;
 
+    universal_properties = relay_node_universal_properties(
+        &universal_property_count);
     for (index = 0; index < blueprint->schema.input_count; index++) {
         const Relay_NodePortDefinition port = {
             blueprint->schema.inputs[index].key,
@@ -582,7 +798,8 @@ static void relay_blueprint_definition_refresh(Relay_Blueprint *blueprint)
         blueprint->key, blueprint->name, "λ",
         "Compiled hierarchical Blueprint module.", RELAY_NODE_CATEGORY_MODULE,
         blueprint->inputs, blueprint->schema.input_count, blueprint->outputs,
-        blueprint->schema.output_count, NULL, 0
+        blueprint->schema.output_count, universal_properties,
+        universal_property_count, {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
     };
     blueprint->input_boundary_definition = (Relay_NodeDefinition){
         (Relay_NodeDefinitionId)(RELAY_BLUEPRINT_INPUT_DEFINITION_ID_BASE +
@@ -591,7 +808,8 @@ static void relay_blueprint_definition_refresh(Relay_Blueprint *blueprint)
         "Public inputs entering this Blueprint architecture.",
         RELAY_NODE_CATEGORY_MODULE, NULL, 0,
         blueprint->input_boundary_outputs, blueprint->schema.input_count,
-        NULL, 0
+        universal_properties, universal_property_count,
+        {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
     };
     blueprint->process_definition = (Relay_NodeDefinition){
         (Relay_NodeDefinitionId)(RELAY_BLUEPRINT_PROCESS_DEFINITION_ID_BASE +
@@ -600,7 +818,8 @@ static void relay_blueprint_definition_refresh(Relay_Blueprint *blueprint)
         "The Blueprint's implicit player-authored Lua process.",
         RELAY_NODE_CATEGORY_MODULE, blueprint->process_inputs,
         blueprint->schema.input_count, blueprint->process_outputs,
-        blueprint->schema.output_count, NULL, 0
+        blueprint->schema.output_count, universal_properties,
+        universal_property_count, {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
     };
     blueprint->output_boundary_definition = (Relay_NodeDefinition){
         (Relay_NodeDefinitionId)(RELAY_BLUEPRINT_OUTPUT_DEFINITION_ID_BASE +
@@ -608,7 +827,8 @@ static void relay_blueprint_definition_refresh(Relay_Blueprint *blueprint)
         "blueprint.boundary.outputs", "Module Outputs", "⇤",
         "Public outputs leaving this Blueprint architecture.",
         RELAY_NODE_CATEGORY_MODULE, blueprint->output_boundary_inputs,
-        blueprint->schema.output_count, NULL, 0, NULL, 0
+        blueprint->schema.output_count, NULL, 0, universal_properties,
+        universal_property_count, {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
     };
 }
 
@@ -1031,6 +1251,7 @@ bool relay_blueprint_rebuild_plan(Relay_BlueprintLibrary *library,
     Relay_Blueprint *blueprint)
 {
     char candidate_source[RELAY_BLUEPRINT_SOURCE_CAPACITY];
+    char runtime_source[RELAY_BLUEPRINT_SOURCE_CAPACITY];
     size_t candidate_source_size = 0;
     Relay_ScriptArtifact candidate_artifact = {0};
     Relay_ScriptSchema candidate_schema = {0};
@@ -1041,7 +1262,9 @@ bool relay_blueprint_rebuild_plan(Relay_BlueprintLibrary *library,
     if (library == NULL || blueprint == NULL ||
         !relay_blueprint_source_from_scene(blueprint, candidate_source,
             &candidate_source_size) ||
-        !relay_script_runtime_compile(library->runtime, candidate_source,
+        !relay_blueprint_runtime_source(candidate_source,
+            candidate_source_size, runtime_source) ||
+        !relay_script_runtime_compile(library->runtime, runtime_source,
             candidate_source_size, candidate_revision, &candidate_artifact,
             &candidate_schema, &blueprint->diagnostic) ||
         !relay_blueprint_schema_equal(&blueprint->schema, &candidate_schema) ||
@@ -1069,6 +1292,7 @@ bool relay_blueprint_rebuild_plan(Relay_BlueprintLibrary *library,
 bool relay_blueprint_compile(Relay_BlueprintLibrary *library,
     Relay_Blueprint *blueprint)
 {
+    char runtime_source[RELAY_BLUEPRINT_SOURCE_CAPACITY];
     Relay_ScriptArtifact candidate_artifact = {0};
     Relay_ScriptSchema candidate_schema = {0};
     Relay_ScriptSchema old_schema;
@@ -1080,7 +1304,9 @@ bool relay_blueprint_compile(Relay_BlueprintLibrary *library,
     bool interface_changed;
 
     if (library == NULL || library->runtime == NULL || blueprint == NULL ||
-        !relay_script_runtime_compile(library->runtime, blueprint->source,
+        !relay_blueprint_runtime_source(blueprint->source,
+            blueprint->source_size, runtime_source) ||
+        !relay_script_runtime_compile(library->runtime, runtime_source,
             blueprint->source_size, blueprint->revision, &candidate_artifact,
             &candidate_schema, &blueprint->diagnostic)) {
         return false;
@@ -1114,7 +1340,7 @@ bool relay_blueprint_compile(Relay_BlueprintLibrary *library,
         relay_script_artifact_shutdown(library->runtime, &candidate_artifact);
         (void)snprintf(blueprint->diagnostic.message,
             sizeof(blueprint->diagnostic.message),
-            "Invalid Blueprint architecture block.");
+            "Invalid Blueprint architecture declarations.");
         return false;
     }
     blueprint->scene = candidate_scene;

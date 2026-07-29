@@ -32,7 +32,6 @@ typedef struct Relay_App {
     Relay_Terminal terminal;
     Relay_TerminalOverlay overlay;
     bool should_exit;
-    uint64_t frame_index;
     double last_frame_seconds;
     double simulation_accumulator;
 } Relay_App;

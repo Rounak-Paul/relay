@@ -14,7 +14,7 @@ runtime. The replacement preserves the important constraints:
 - no filesystem, process, environment, networking, dynamic loading, host clock,
   debug library, or terminal output;
 - no floating-point value may cross the gameplay API;
-- scripts read immutable tick snapshots and emit commands for a later phase;
+- scripts read immutable activation snapshots and emit commands for a later phase;
 - stable IDs and deterministic ordering define all observable behavior;
 - source plus version metadata is authoritative; Lua bytecode is never a save
   or blueprint interchange format;
@@ -94,7 +94,7 @@ Exit criteria:
 Scope:
 
 - add controller/program-slot ownership to node definitions and instances;
-- expose immutable previous-tick node/property/port snapshots to Lua;
+- expose immutable previous-step node/property/port snapshots to Lua;
 - resolve authored names to stable IDs at install time;
 - derive read/write/message capabilities from physical typed graph connections;
 - queue typed property writes and messages without direct world mutation;
@@ -108,7 +108,7 @@ Exit criteria:
 
 - two controllers produce the same committed state regardless of storage order;
 - access without a valid control/message path returns a typed denial;
-- budget exhaustion cannot stall a simulation tick;
+- budget exhaustion cannot stall a simulation step;
 - program state survives save/reload independently of Lua VM internals; and
 - scripts cannot mutate terminal, application, event bus, or node arrays.
 
@@ -134,11 +134,11 @@ Scope:
 
 Exit criteria:
 
-- a blueprint containing a Clock, Coal Miner, feedback fuel edge, and control
-  program can be nested twice and instantiated atomically;
+- a blueprint containing a Timer, source miners, typed material routing, and a
+  control program can be nested twice and instantiated atomically;
 - invalid nested dependencies or bindings create no nodes or edges;
 - equivalent compilations yield identical plans and provenance paths; and
-- instantiated modules use normal graph compatibility and tick semantics.
+- instantiated modules use normal graph compatibility and fixed-step semantics.
 
 ## Stage 4 — in-game Code and Blueprint workspaces
 
@@ -173,7 +173,8 @@ Exit criteria:
 
 Scope:
 
-- implement subscriptions for tick, clock edge, node state, message, and fault;
+- extend the implemented input-activation observer with node state, message,
+  and fault subscriptions;
 - add bounded deterministic event queues and latched critical events;
 - provide pause, step, bounded run, watches, breakpoints, invocation traces,
   property-write history, capability failures, and “why blocked” explanations;
@@ -184,7 +185,7 @@ Scope:
 Exit criteria:
 
 - the exact program and source line responsible for a state change is traceable;
-- stepping and continuous running reach the same state at the same tick;
+- stepping and continuous running reach the same simulation step;
 - queue overflow and budget failures are deterministic and visible; and
 - replay reproduces script commands and state hashes.
 
@@ -213,7 +214,7 @@ Exit criteria:
 Scope:
 
 - add the first controller and typed control connections;
-- provide Clock, Coal Miner, storage/target state, and the minimum material chain;
+- provide Timer, Coal Miner, storage/target state, and the minimum material chain;
 - ship a working starter program and API hints;
 - require the player to adapt policy rather than manually trigger each cycle;
 - package the working line as a reusable blueprint and instantiate it again; and
@@ -234,7 +235,7 @@ Scope:
 
 - fuzz the subset validator, blueprint importer, artifact loader, and API decoder;
 - soak nested scripted factories under instruction/memory/event limits;
-- benchmark compile, instantiate, tick, debugger, save, and load paths;
+- benchmark compile, instantiate, simulation-step, debugger, save, and load paths;
 - validate deterministic hashes across macOS, Linux, and Windows;
 - complete keyboard-only and terminal compatibility acceptance; and
 - audit all Lua and blueprint APIs for capability, bounds, and lifecycle safety.

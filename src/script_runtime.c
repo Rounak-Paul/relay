@@ -26,6 +26,22 @@ typedef struct Relay_ScriptCompileContext {
     Relay_ScriptDiagnostic *diagnostic;
 } Relay_ScriptCompileContext;
 
+/** One capitalized Lua enum member mapped to an executable graph port type. */
+typedef struct Relay_ScriptPortTypeEntry {
+    const char *name;
+    Relay_NodePortType type;
+} Relay_ScriptPortTypeEntry;
+
+static const Relay_ScriptPortTypeEntry relay_script_port_types[] = {
+    {"TRIGGER", RELAY_NODE_PORT_TYPE_TRIGGER},
+    {"COAL", RELAY_NODE_PORT_TYPE_COAL},
+    {"IRON_ORE", RELAY_NODE_PORT_TYPE_IRON_ORE},
+    {"COPPER_ORE", RELAY_NODE_PORT_TYPE_COPPER_ORE},
+    {"STONE", RELAY_NODE_PORT_TYPE_STONE},
+    {"BOOLEAN", RELAY_NODE_PORT_TYPE_BOOLEAN},
+    {"INTEGER", RELAY_NODE_PORT_TYPE_INTEGER}
+};
+
 /** Allocate Lua memory while enforcing the owning runtime's hard limit. */
 static void *relay_script_runtime_allocate(void *context, void *pointer,
     size_t old_size, size_t new_size)
@@ -163,6 +179,12 @@ static int relay_script_read_only_error(lua_State *state)
     return luaL_error(state, "standard libraries are read-only");
 }
 
+/** Reject an attempted mutation of Relay's shared port-type enum. */
+static int relay_script_type_read_only_error(lua_State *state)
+{
+    return luaL_error(state, "Type enum is read-only");
+}
+
 /** Reject an attempted write to the immutable tick input snapshot. */
 static int relay_script_input_read_only_error(lua_State *state)
 {
@@ -201,9 +223,38 @@ static void relay_script_environment_add_library(lua_State *state,
     lua_setfield(state, environment_index, name);
 }
 
+/** Add the immutable capitalized port-type enum to a module environment. */
+static void relay_script_environment_add_type_enum(lua_State *state,
+    int environment_index)
+{
+    size_t index;
+
+    environment_index = lua_absindex(state, environment_index);
+    lua_newtable(state);
+    lua_newtable(state);
+    lua_newtable(state);
+    for (index = 0; index < sizeof(relay_script_port_types) /
+            sizeof(relay_script_port_types[0]); index++) {
+        lua_pushinteger(state, relay_script_port_types[index].type);
+        lua_setfield(state, -2, relay_script_port_types[index].name);
+    }
+    lua_setfield(state, -2, "__index");
+    lua_pushcfunction(state, relay_script_type_read_only_error);
+    lua_setfield(state, -2, "__newindex");
+    lua_pushliteral(state, "Relay Type enum");
+    lua_setfield(state, -2, "__metatable");
+    (void)lua_setmetatable(state, -2);
+    lua_setfield(state, environment_index, "Type");
+}
+
 /** Return whether a script port key is stable and safe for lookup. */
 static bool relay_script_port_key_is_valid(const char *key, size_t length)
 {
+    static const char *const reserved[] = {
+        "and", "break", "do", "else", "elseif", "end", "false", "for",
+        "function", "goto", "if", "in", "local", "nil", "not", "or",
+        "repeat", "return", "then", "true", "until", "while"
+    };
     size_t index;
 
     if (length == 0 || length >= RELAY_SCRIPT_PORT_KEY_CAPACITY ||
@@ -215,19 +266,26 @@ static bool relay_script_port_key_is_valid(const char *key, size_t length)
             return false;
         }
     }
+    for (index = 0; index < sizeof(reserved) / sizeof(reserved[0]); index++) {
+        if (strlen(reserved[index]) == length &&
+            memcmp(key, reserved[index], length) == 0) {
+            return false;
+        }
+    }
     return true;
 }
 
-/** Parse one script-facing fixed port type name. */
-static Relay_NodePortType relay_script_port_type_parse(const char *name)
+/** Validate one Lua enum value against the executable script type registry. */
+static Relay_NodePortType relay_script_port_type_parse(lua_Integer value)
 {
-    if (strcmp(name, "clock") == 0) return RELAY_NODE_PORT_TYPE_CLOCK;
-    if (strcmp(name, "coal") == 0) return RELAY_NODE_PORT_TYPE_COAL;
-    if (strcmp(name, "iron_ore") == 0) return RELAY_NODE_PORT_TYPE_IRON_ORE;
-    if (strcmp(name, "copper_ore") == 0) return RELAY_NODE_PORT_TYPE_COPPER_ORE;
-    if (strcmp(name, "stone") == 0) return RELAY_NODE_PORT_TYPE_STONE;
-    if (strcmp(name, "boolean") == 0) return RELAY_NODE_PORT_TYPE_BOOLEAN;
-    if (strcmp(name, "integer") == 0) return RELAY_NODE_PORT_TYPE_INTEGER;
+    size_t index;
+
+    for (index = 0; index < sizeof(relay_script_port_types) /
+            sizeof(relay_script_port_types[0]); index++) {
+        if ((lua_Integer)relay_script_port_types[index].type == value) {
+            return relay_script_port_types[index].type;
+        }
+    }
     return RELAY_NODE_PORT_TYPE_INVALID;
 }
 
@@ -257,8 +315,8 @@ static int relay_script_declare_port(lua_State *state, bool output)
         lua_upvalueindex(1));
     size_t key_length;
     const char *key = luaL_checklstring(state, 1, &key_length);
-    const char *type_name = luaL_checkstring(state, 2);
-    const Relay_NodePortType type = relay_script_port_type_parse(type_name);
+    const lua_Integer type_value = luaL_checkinteger(state, 2);
+    const Relay_NodePortType type = relay_script_port_type_parse(type_value);
     Relay_ScriptPort *port;
     size_t *count;
 
@@ -266,7 +324,8 @@ static int relay_script_declare_port(lua_State *state, bool output)
         return luaL_error(state, "invalid port key '%s'", key);
     }
     if (type == RELAY_NODE_PORT_TYPE_INVALID) {
-        return luaL_error(state, "unsupported port type '%s'", type_name);
+        return luaL_error(state, "unsupported Type enum value %lld",
+            (long long)type_value);
     }
     if (relay_script_schema_has_key(&context->schema, key)) {
         return luaL_error(state, "duplicate port key '%s'", key);
@@ -322,6 +381,7 @@ static int relay_script_environment_create(lua_State *state,
         LUA_TABLIBNAME);
     relay_script_environment_add_library(state, environment_index,
         LUA_UTF8LIBNAME);
+    relay_script_environment_add_type_enum(state, environment_index);
     lua_pushlightuserdata(state, context);
     lua_pushcclosure(state, relay_script_declare_input, 1);
     lua_setfield(state, environment_index, "input");
@@ -656,14 +716,14 @@ bool relay_script_runtime_compile(Relay_ScriptRuntime *runtime,
     lua_setfield(state, environment_index, "input");
     lua_pushnil(state);
     lua_setfield(state, environment_index, "output");
-    lua_getfield(state, environment_index, "tick");
+    lua_getfield(state, environment_index, "on_process");
     if (!lua_isfunction(state, -1)) {
         relay_script_diagnostic_set(diagnostic,
-            "Module must define function tick(inputs, state).");
+            "Module must define function on_process(inputs, state).");
         lua_settop(state, stack_base);
         return false;
     }
-    candidate.tick_reference = luaL_ref(state, LUA_REGISTRYINDEX);
+    candidate.on_process_reference = luaL_ref(state, LUA_REGISTRYINDEX);
     candidate.revision = revision;
     candidate.installed = true;
     relay_script_environment_seal(state, environment_index);
@@ -705,10 +765,10 @@ bool relay_script_runtime_invoke(Relay_ScriptRuntime *runtime,
         instance->runtime_reference = luaL_ref(state, LUA_REGISTRYINDEX);
         instance->initialized = true;
     }
-    lua_rawgeti(state, LUA_REGISTRYINDEX, artifact->tick_reference);
+    lua_rawgeti(state, LUA_REGISTRYINDEX, artifact->on_process_reference);
     if (!lua_isfunction(state, -1)) {
         relay_script_diagnostic_set(diagnostic,
-            "Installed tick function is unavailable.");
+            "Installed on_process function is unavailable.");
         lua_settop(state, stack_base);
         return false;
     }
@@ -746,7 +806,7 @@ bool relay_script_runtime_invoke(Relay_ScriptRuntime *runtime,
     }
     if (!lua_isnil(state, -1) && !lua_istable(state, -1)) {
         relay_script_diagnostic_set(diagnostic,
-            "tick must return an output table or nil.");
+            "on_process must return an output table or nil.");
         luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
         lua_settop(state, stack_base);
         return false;
@@ -804,7 +864,7 @@ void relay_script_artifact_shutdown(Relay_ScriptRuntime *runtime,
     }
     if (runtime != NULL && runtime->state != NULL && artifact->installed) {
         state = runtime->state;
-        luaL_unref(state, LUA_REGISTRYINDEX, artifact->tick_reference);
+        luaL_unref(state, LUA_REGISTRYINDEX, artifact->on_process_reference);
     }
     *artifact = (Relay_ScriptArtifact){0};
 }

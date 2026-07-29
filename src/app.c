@@ -48,10 +48,10 @@ static Relay_GameInput relay_app_game_input(const Relay_TerminalEvent *event)
         return RELAY_GAME_INPUT_TOGGLE_MAP;
     }
     if (event->character == '[') {
-        return RELAY_GAME_INPUT_PREVIOUS_CLOCK_RATE;
+        return RELAY_GAME_INPUT_PREVIOUS_TIMER_INTERVAL;
     }
     if (event->character == ']') {
-        return RELAY_GAME_INPUT_NEXT_CLOCK_RATE;
+        return RELAY_GAME_INPUT_NEXT_TIMER_INTERVAL;
     }
     return RELAY_GAME_INPUT_NONE;
 }
@@ -188,8 +188,8 @@ static void relay_app_on_event(const Relay_Event *event, void *context)
         app->should_exit = true;
     } else if (event->type == RELAY_EVENT_TERMINAL_RESIZED) {
         relay_logger_log(&app->logger, RELAY_LOG_LEVEL_DEBUG,
-            "Terminal resized on frame %llu.",
-            (unsigned long long)app->frame_index);
+            "Terminal resized at simulation step %llu.",
+            (unsigned long long)app->game.simulation_step);
         if (!relay_terminal_draw(&app->terminal, &app->game, app->overlay)) {
             relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                 "Terminal redraw failed.");
@@ -285,6 +285,7 @@ int relay_app_run(Relay_App *app)
         double now;
         double elapsed;
         bool simulation_changed = false;
+        bool simulation_caught_up;
 
         if (!relay_terminal_poll(&app->terminal, &app->game, &event)) {
             relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
@@ -296,20 +297,29 @@ int relay_app_run(Relay_App *app)
         now = relay_app_now_seconds();
         elapsed = now - app->last_frame_seconds;
         app->last_frame_seconds = now;
-        if (elapsed < 0.0 || elapsed > 0.25) {
+        if (elapsed < 0.0) {
             elapsed = 0.0;
         }
         app->simulation_accumulator += elapsed;
-        while (app->simulation_accumulator >= 1.0 / 60.0) {
-            if (!relay_game_step(&app->game)) {
-                relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
-                    "Gameplay simulation step failed.");
-                app->state = RELAY_APP_STATE_FAILED;
-                return 1;
+        {
+            size_t catch_up_steps = 0;
+            const double simulation_interval =
+                1.0 / RELAY_GAME_SIMULATION_STEPS_PER_SECOND;
+
+            while (app->simulation_accumulator >= simulation_interval &&
+                catch_up_steps < RELAY_GAME_MAX_CATCH_UP_STEPS) {
+                if (!relay_game_step(&app->game)) {
+                    relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
+                        "Gameplay simulation step failed.");
+                    app->state = RELAY_APP_STATE_FAILED;
+                    return 1;
+                }
+                app->simulation_accumulator -= simulation_interval;
+                simulation_changed = true;
+                catch_up_steps++;
             }
-            app->simulation_accumulator -= 1.0 / 60.0;
-            simulation_changed = true;
-            app->frame_index++;
+            simulation_caught_up =
+                app->simulation_accumulator < simulation_interval;
         }
         if (event.type == RELAY_TERMINAL_EVENT_RESIZED ||
             event.type == RELAY_TERMINAL_EVENT_QUIT) {
@@ -421,7 +431,8 @@ int relay_app_run(Relay_App *app)
                 app->state = RELAY_APP_STATE_FAILED;
                 return 1;
             }
-        } else if (event.type == RELAY_TERMINAL_EVENT_NONE && simulation_changed &&
+        } else if (event.type == RELAY_TERMINAL_EVENT_NONE &&
+            simulation_changed && simulation_caught_up &&
             !relay_terminal_draw(&app->terminal, &app->game, app->overlay)) {
             relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                 "Simulation frame redraw failed.");
@@ -431,8 +442,8 @@ int relay_app_run(Relay_App *app)
     }
 
     relay_logger_log(&app->logger, RELAY_LOG_LEVEL_INFO,
-        "Relay game loop stopped after %llu frames.",
-        (unsigned long long)app->frame_index);
+        "Relay game loop stopped after %llu simulation steps.",
+        (unsigned long long)app->game.simulation_step);
     return 0;
 }
 

@@ -5,14 +5,21 @@
 
 enum {
     RELAY_GAME_STARTING_CURRENCY = 100,
-    RELAY_GAME_CLOCK_PRICE = 30,
-    RELAY_GAME_COAL_REQUIRED_PULSES = 16,
+    RELAY_GAME_TIMER_PRICE = 30,
+    RELAY_GAME_COAL_MINER_PRICE = 20,
+    RELAY_GAME_IRON_MINER_PRICE = 30,
+    RELAY_GAME_COPPER_MINER_PRICE = 30,
+    RELAY_GAME_STONE_MINER_PRICE = 20,
     RELAY_GAME_NODE_SPACING_X = 30
 };
 
-/** Clock is the first purchased gameplay module. */
+/** Purchasable built-in definitions and their gameplay-balanced prices. */
 static const Relay_ShopOffer relay_shop_offers[] = {
-    {RELAY_NODE_DEFINITION_CLOCK, RELAY_GAME_CLOCK_PRICE}
+    {RELAY_NODE_DEFINITION_TIMER, RELAY_GAME_TIMER_PRICE},
+    {RELAY_NODE_DEFINITION_COAL_MINER, RELAY_GAME_COAL_MINER_PRICE},
+    {RELAY_NODE_DEFINITION_IRON_MINER, RELAY_GAME_IRON_MINER_PRICE},
+    {RELAY_NODE_DEFINITION_COPPER_MINER, RELAY_GAME_COPPER_MINER_PRICE},
+    {RELAY_NODE_DEFINITION_STONE_MINER, RELAY_GAME_STONE_MINER_PRICE}
 };
 
 /** Store focus in the active workspace and its shared renderer-facing field. */
@@ -27,19 +34,22 @@ static void relay_game_set_focused_node(Relay_Game *game, Relay_NodeId node_id)
     }
 }
 
-/** Return the adjacent editable clock period, wrapping through valid rates. */
-static int64_t relay_game_next_clock_period(int64_t period, int direction)
+/** Return the adjacent timer interval, wrapping through valid durations. */
+static int64_t relay_game_next_timer_interval(int64_t interval, int direction)
 {
-    static const int64_t periods[] = {2, 4, 8, 16, 32, 64, 128};
+    const size_t count = relay_timer_interval_count();
     size_t index;
 
-    for (index = 0; index < sizeof(periods) / sizeof(periods[0]); index++) {
-        if (periods[index] == period) {
-            const size_t count = sizeof(periods) / sizeof(periods[0]);
-            return periods[(index + count + direction) % count];
+    for (index = 0; index < count; index++) {
+        if (relay_timer_interval_at(index) == interval) {
+            const size_t next = direction < 0 ?
+                (index == 0 ? count - 1 : index - 1) :
+                (index + 1) % count;
+
+            return relay_timer_interval_at(next);
         }
     }
-    return periods[0];
+    return relay_timer_interval_at(0);
 }
 
 /** Create a deterministic free grid position for a purchased gameplay module. */
@@ -88,18 +98,57 @@ static Relay_GameActionResult relay_game_purchase_selected(Relay_Game *game)
     return RELAY_GAME_ACTION_PURCHASED;
 }
 
-/** Update one clock output before consumers read this fixed gameplay tick. */
-static void relay_game_step_clock(Relay_Node *node)
+/** Return whether a node and its owning flattened module are enabled. */
+static bool relay_game_node_enabled(const Relay_NodeWorld *world,
+    const Relay_Node *node)
 {
-    node->output_values[0] = 0;
+    const Relay_Node *module;
+
     if (!node->enabled) {
+        return false;
+    }
+    if (node->module_instance_id == 0) {
+        return true;
+    }
+    module = relay_node_world_find_const(world, node->module_instance_id);
+    return module != NULL && module->enabled;
+}
+
+/** Advance one optional timer and emit a one-step trigger at its interval. */
+static void relay_game_step_timer(Relay_Node *node)
+{
+    const Relay_NodeSimulationDefinition *simulation =
+        &node->definition->simulation;
+
+    node->timer_elapsed_steps++;
+    if (node->timer_elapsed_steps >= node->timer_interval_steps) {
+        node->timer_elapsed_steps = 0;
+        node->output_values[simulation->output_port_index] =
+            simulation->output_amount;
+        node->produced = node->produced >
+            INT64_MAX - simulation->output_amount ? INT64_MAX :
+            node->produced + simulation->output_amount;
+    }
+}
+
+/** Advance one autonomous fixed-rate source from immutable definition data. */
+static void relay_game_step_fixed_rate_source(Relay_Node *node)
+{
+    const Relay_NodeSimulationDefinition *simulation =
+        &node->definition->simulation;
+
+    if (simulation->interval_steps == 0 ||
+        simulation->output_port_index >= node->definition->output_count) {
         return;
     }
-    node->clock_phase++;
-    if (node->clock_phase >= node->clock_period) {
-        node->clock_phase = 0;
-        node->output_values[0] = 1;
-        node->produced++;
+    node->progress++;
+    if ((uint64_t)node->progress >= simulation->interval_steps) {
+        node->progress = 0;
+        node->produced = node->produced >
+            INT64_MAX - simulation->output_amount ? INT64_MAX :
+            node->produced + simulation->output_amount;
+        node->output_values[simulation->output_port_index] =
+            simulation->output_amount;
     }
 }
 
@@ -403,14 +452,18 @@ Relay_GameActionResult relay_game_handle_input(Relay_Game *game,
         game->workspace_mode = game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH ?
             RELAY_GAME_WORKSPACE_MAP : RELAY_GAME_WORKSPACE_GRAPH;
         game->last_action = RELAY_GAME_ACTION_NONE;
-    } else if (input == RELAY_GAME_INPUT_PREVIOUS_CLOCK_RATE ||
-        input == RELAY_GAME_INPUT_NEXT_CLOCK_RATE) {
+    } else if (input == RELAY_GAME_INPUT_PREVIOUS_TIMER_INTERVAL ||
+        input == RELAY_GAME_INPUT_NEXT_TIMER_INTERVAL) {
         focused = relay_node_world_find(relay_game_active_world(game),
             game->focused_node_id);
-        if (focused != NULL && focused->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
-            value.integer = relay_game_next_clock_period(focused->clock_period,
-                input == RELAY_GAME_INPUT_NEXT_CLOCK_RATE ? 1 : -1);
-            (void)relay_node_property_set(focused, "clock.period",
+        if (focused != NULL &&
+            focused->definition != NULL &&
+            focused->definition->simulation.behavior ==
+                RELAY_NODE_BEHAVIOR_TIMER) {
+            value.integer = relay_game_next_timer_interval(
+                focused->timer_interval_steps,
+                input == RELAY_GAME_INPUT_NEXT_TIMER_INTERVAL ? 1 : -1);
+            (void)relay_node_property_set(focused, "timer.interval_steps",
                 RELAY_NODE_VALUE_INTEGER, value);
         }
         game->last_action = RELAY_GAME_ACTION_NONE;
@@ -850,6 +903,7 @@ static void relay_game_step_script(Relay_Game *game, Relay_NodeWorld *world,
         &game->blueprints, node->blueprint_id);
     int64_t inputs[RELAY_NODE_MAX_PORTS] = {0};
     int64_t outputs[RELAY_NODE_MAX_PORTS] = {0};
+    bool should_process = !node->script_state.initialized;
     size_t index;
 
     if (blueprint == NULL) {
@@ -857,10 +911,23 @@ static void relay_game_step_script(Relay_Game *game, Relay_NodeWorld *world,
     }
     for (index = 0; index < blueprint->schema.input_count; index++) {
         inputs[index] = relay_game_input_value(game, world, node, index);
+        if ((relay_node_port_type_is_transient(
+                    blueprint->schema.inputs[index].type) &&
+                inputs[index] != 0) ||
+            (!relay_node_port_type_is_transient(
+                    blueprint->schema.inputs[index].type) &&
+                inputs[index] != node->process_input_values[index])) {
+            should_process = true;
+        }
+        node->process_input_values[index] = inputs[index];
+    }
+    if (!should_process) {
+        return;
     }
     if (relay_script_runtime_invoke(game->script_runtime, &blueprint->artifact,
             &node->script_state, &blueprint->schema, inputs, outputs,
             &blueprint->diagnostic)) {
+        node->process_activations++;
         for (index = 0; index < blueprint->schema.output_count; index++) {
             node->output_values[index] = outputs[index];
         }
@@ -874,22 +941,35 @@ static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
 
     for (index = 0; index < world->count; index++) {
         Relay_Node *node = &world->nodes[index];
+        const Relay_NodeDefinition *definition =
+            relay_node_definition_for(node);
+        const bool enabled = relay_game_node_enabled(world, node);
         size_t port_index;
 
         for (port_index = 0; port_index < RELAY_NODE_MAX_PORTS; port_index++) {
             node->previous_output_values[port_index] =
                 node->output_values[port_index];
-            node->output_values[port_index] = 0;
+            if (definition == NULL ||
+                port_index >= definition->output_count ||
+                relay_node_port_type_is_transient(
+                    definition->outputs[port_index].type)) {
+                node->output_values[port_index] = 0;
+            }
+            if (!enabled) {
+                node->output_values[port_index] = 0;
+            }
         }
 
-        if (node->definition_id == RELAY_NODE_DEFINITION_CLOCK) {
-            relay_game_step_clock(node);
+        if (enabled && definition != NULL &&
+            definition->simulation.behavior == RELAY_NODE_BEHAVIOR_TIMER) {
+            relay_game_step_timer(node);
         }
     }
     for (index = 0; index < world->count; index++) {
         Relay_Node *node = &world->nodes[index];
 
-        if (node->runtime_kind ==
+        if (relay_game_node_enabled(world, node) &&
+            node->runtime_kind ==
                 RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
             relay_game_step_script(game, world, node);
         }
@@ -897,26 +977,11 @@ static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
     for (index = 0; index < world->count; index++) {
         Relay_Node *node = &world->nodes[index];
 
-        if (node->definition_id == RELAY_NODE_DEFINITION_COAL_MINER) {
-            const int64_t fuel_input = relay_game_input_value(game, world,
-                node, 1);
-
-            node->output_values[0] = 0;
-            if (fuel_input > 0) node->fuel_coal += fuel_input;
-            if (!node->enabled ||
-                relay_game_input_value(game, world, node, 0) <= 0) continue;
-            if (!node->processing) {
-                if (node->fuel_coal <= 0) continue;
-                node->fuel_coal--;
-                node->processing = true;
-            }
-            node->progress++;
-            if (node->progress >= RELAY_GAME_COAL_REQUIRED_PULSES) {
-                node->progress = 0;
-                node->produced++;
-                node->output_values[0] = 1;
-                node->processing = false;
-            }
+        if (relay_game_node_enabled(world, node) &&
+            node->definition != NULL &&
+            node->definition->simulation.behavior ==
+                RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
+            relay_game_step_fixed_rate_source(node);
         }
     }
     for (index = 0; index < world->module_output_binding_count; index++) {
@@ -925,7 +990,8 @@ static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
         Relay_Node *module = relay_node_world_find(world,
             binding->module_node_id);
 
-        if (module == NULL) {
+        if (module == NULL ||
+            !relay_game_node_enabled(world, module)) {
             continue;
         }
         if (binding->source_is_module_input) {
@@ -950,7 +1016,7 @@ bool relay_game_step(Relay_Game *game)
         return false;
     }
     relay_game_step_world(game, &game->nodes);
-    game->simulation_tick++;
+    game->simulation_step++;
     return true;
 }
 

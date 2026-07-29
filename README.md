@@ -43,19 +43,17 @@ in [AGENTS.md](AGENTS.md).
 
 ## Controls
 
-The game starts with a Coal Miner and 100 neutral currency. The Shop sells
-Clock modules. Use `j`/`k` or the arrow keys to choose an offer, then Enter to
-purchase and place it in the Relay workspace. Drag either the Clock output row
-or the Coal Miner input row onto its compatible opposite port to wire them
-together. A Clock emits its `Clock` signal every configured gameplay ticks.
-Press Tab or click a panel tab to switch between Shop, Inspector, and Scripts. Click
-a node title to focus it and open its Inspector. Its Clocking Wizard
-shows the `Clock` signal and current period; use `[` and `]` to choose 2, 4,
-8, 16, 32, 64, or 128 ticks.
-Drag the Coal Miner's Coal output back to its Fuel input to make the initial
-bootstrap loop self-sustaining. The starter miner carries one coal of fuel,
-then consumes one coal for each 16-pulse mining cycle. Its progress row shows
-remaining fuel (`F`) and processing progress.
+The game starts with a Coal Miner and 100 neutral currency. The Shop sells Coal,
+Iron, Copper, and Stone miners plus the optional Timer. Use `j`/`k` or the arrow
+keys to choose an offer, then Enter to purchase and place it in the Relay
+workspace. Every miner is an autonomous source that emits one correctly typed
+resource per second while enabled; it has no material or control input. A Timer
+emits a typed `Trigger` event at a configurable interval for scripts and future
+control nodes. Press Tab or click a panel tab to switch between Shop, Inspector,
+and Scripts. Click a node title to focus it and open its Inspector. Miner
+Inspectors show output type, fixed rate, progress, and lifetime production. The
+Timer Inspector uses `[` and `]` to choose an interval of 1, 2, 4, 8, or 16
+seconds.
 
 The main workspace begins with a `Relay` tab. It is an unbounded graph canvas:
 drag with the left mouse button to pan its grid, and purchased sources appear
@@ -68,8 +66,9 @@ cyan orthogonal wires with rounded turns and short port stubs, rendered behind
 the cards. A matching live wire previews its route while you drag from either
 port direction; forward links use the minimal centered path, while reverse
 links take a safe outside-card detour. All wires follow panning and node movement.
-Port colors identify their fixed semantic type: Clock is cyan and Coal is amber.
-Types are enforced by the graph, so a Coal output cannot feed a Clock input.
+Port colors identify fixed semantic types for Trigger, Coal, Iron Ore, Copper
+Ore, and Stone. Types are enforced by the graph, so resource kinds cannot be
+interchanged or fed into a Trigger input.
 
 Every purchased node becomes the viewport focus. Press `m` to toggle the Relay
 map view, which zooms out to compact node names; drag its empty space to pan at

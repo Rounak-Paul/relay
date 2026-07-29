@@ -52,19 +52,21 @@ to scripts: use node IDs and `relay_node_property_get` or
 connection rule: one output may fan out, each input has one replaceable source,
 and compatibility is determined by the declared port value type. Reusable and
 script-authored modules must compile to this same graph contract;
-do not create a parallel scripting-only wire format. Simulation runs at fixed
-gameplay ticks and must not be advanced by rendering or terminal input.
+do not create a parallel scripting-only wire format. Simulation runs in fixed
+steps and must not be advanced by rendering or terminal input.
 
 Self-connections are valid when port schemas are compatible. Evaluate them
-through a previous-tick output snapshot so a feedback loop has deterministic,
+through a previous-step output snapshot so a feedback loop has deterministic,
 non-recursive gameplay semantics.
 
 Lua 5.5 is a private implementation dependency behind Relay-owned scripting
 APIs. Do not expose Lua types in public headers, open additional standard
 libraries, add arbitrary execution entry points, or let scripts access the
 filesystem, environment, process, host clock, network, terminal, logger, event
-bus, or mutable world storage. Gameplay scripts read immutable tick snapshots
-and enqueue capability-checked commands for deterministic commit. Authoritative
+bus, or mutable world storage. Gameplay scripts read immutable activation
+snapshots and enqueue capability-checked commands for deterministic commit.
+Transient resource/trigger inputs activate a process when nonzero; level inputs
+activate it when their value changes. Authoritative
 gameplay values are integers, Booleans, strings, and bounded project-owned
 containers; floating-point values and unordered table iteration are forbidden.
 Source and project-owned typed persistent state are saved; Lua bytecode, stack
@@ -76,9 +78,10 @@ must be cycle-checked and compiled into the same `Relay_NodeWorld` graph with
 instance/local-path provenance. Do not introduce an opaque blueprint simulator,
 parallel wire format, or script-only module graph. Follow the complete stage
 contracts and exit criteria in `docs/SCRIPTING_BLUEPRINT_ROADMAP.md`.
-The Blueprint's own program is an implicit process, never a component in its
-visual architecture. Keep the canonical source architecture region and visual
-graph transactionally synchronized in both directions.
+The Blueprint's own program is an implicit `on_process` observer, never a
+component in its visual architecture. Keep the canonical top-level `instance` and
+`connect` declarations and visual graph transactionally synchronized in both
+directions.
 
 ## Workspace rendering
 

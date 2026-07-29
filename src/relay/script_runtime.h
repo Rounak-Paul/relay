@@ -24,7 +24,7 @@ typedef struct Relay_ScriptRuntime {
 
 /** Compiled script references owned by a runtime and never serialized. */
 typedef struct Relay_ScriptArtifact {
-    int tick_reference;
+    int on_process_reference;
     uint64_t revision;
     bool installed;
 } Relay_ScriptArtifact;
@@ -64,7 +64,7 @@ bool relay_script_runtime_compile(Relay_ScriptRuntime *runtime,
     Relay_ScriptArtifact *artifact, Relay_ScriptSchema *schema,
     Relay_ScriptDiagnostic *diagnostic);
 
-/** Invoke a compiled module for one immutable input snapshot. */
+/** Invoke a compiled module process for one immutable input snapshot. */
 bool relay_script_runtime_invoke(Relay_ScriptRuntime *runtime,
     const Relay_ScriptArtifact *artifact, Relay_ScriptInstanceState *instance,
     const Relay_ScriptSchema *schema, const int64_t *input_values,

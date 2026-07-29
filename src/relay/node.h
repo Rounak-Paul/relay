@@ -10,8 +10,11 @@ typedef uint32_t Relay_NodeDefinitionId;
 
 /** Stable identifiers for Relay's built-in source definitions. */
 typedef enum Relay_BuiltinNodeDefinitionId {
-    RELAY_NODE_DEFINITION_CLOCK = 1,
-    RELAY_NODE_DEFINITION_COAL_MINER
+    RELAY_NODE_DEFINITION_TIMER = 1,
+    RELAY_NODE_DEFINITION_COAL_MINER,
+    RELAY_NODE_DEFINITION_IRON_MINER,
+    RELAY_NODE_DEFINITION_COPPER_MINER,
+    RELAY_NODE_DEFINITION_STONE_MINER
 } Relay_BuiltinNodeDefinitionId;
 
 /** Stable identifier of a node instance. */
@@ -19,7 +22,9 @@ typedef uint64_t Relay_NodeId;
 
 enum {
     RELAY_NODE_MAX_PORTS = 8,
-    RELAY_NODE_LOCAL_KEY_CAPACITY = 32
+    RELAY_NODE_LOCAL_KEY_CAPACITY = 32,
+    RELAY_TIMER_DEFAULT_INTERVAL_STEPS = 60,
+    RELAY_SOURCE_MINER_INTERVAL_STEPS = 60
 };
 
 /** Opaque persistent script state owned by one placed module instance. */
@@ -61,7 +66,7 @@ typedef union Relay_NodeValue {
 /** Fixed semantic types carried by graph ports and enforced by graph wires. */
 typedef enum Relay_NodePortType {
     RELAY_NODE_PORT_TYPE_INVALID,
-    RELAY_NODE_PORT_TYPE_CLOCK,
+    RELAY_NODE_PORT_TYPE_TRIGGER,
     RELAY_NODE_PORT_TYPE_COAL,
     RELAY_NODE_PORT_TYPE_IRON_ORE,
     RELAY_NODE_PORT_TYPE_COPPER_ORE,
@@ -86,6 +91,21 @@ typedef struct Relay_NodePropertyDefinition {
     Relay_NodeValue default_value;
 } Relay_NodePropertyDefinition;
 
+/** Built-in simulation behavior selected by immutable node definition data. */
+typedef enum Relay_NodeBehavior {
+    RELAY_NODE_BEHAVIOR_NONE,
+    RELAY_NODE_BEHAVIOR_TIMER,
+    RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE
+} Relay_NodeBehavior;
+
+/** Immutable parameters used to execute one data-driven node behavior. */
+typedef struct Relay_NodeSimulationDefinition {
+    Relay_NodeBehavior behavior;
+    uint32_t interval_steps;
+    size_t output_port_index;
+    int64_t output_amount;
+} Relay_NodeSimulationDefinition;
+
 /** Immutable, data-driven definition shared by all matching nodes. */
 typedef struct Relay_NodeDefinition {
     Relay_NodeDefinitionId id;
@@ -100,6 +120,7 @@ typedef struct Relay_NodeDefinition {
     size_t output_count;
     const Relay_NodePropertyDefinition *properties;
     size_t property_count;
+    Relay_NodeSimulationDefinition simulation;
 } Relay_NodeDefinition;
 
 /** Mutable node instance placed in the game's grid world. */
@@ -109,23 +130,22 @@ typedef struct Relay_Node {
     const Relay_NodeDefinition *definition;
     int64_t grid_x;
     int64_t grid_y;
-    int64_t remaining_resource;
     int64_t progress;
     int64_t produced;
-    int64_t clock_period;
-    int64_t clock_phase;
+    int64_t timer_interval_steps;
+    int64_t timer_elapsed_steps;
     int64_t output_values[RELAY_NODE_MAX_PORTS];
     int64_t previous_output_values[RELAY_NODE_MAX_PORTS];
-    int64_t fuel_coal;
+    int64_t process_input_values[RELAY_NODE_MAX_PORTS];
     uint64_t blueprint_id;
     uint64_t origin_blueprint_id;
     Relay_NodeId origin_node_id;
     Relay_NodeId module_instance_id;
     char local_key[RELAY_NODE_LOCAL_KEY_CAPACITY];
     Relay_ScriptInstanceState script_state;
+    uint64_t process_activations;
     Relay_NodeRuntimeKind runtime_kind;
     bool enabled;
-    bool processing;
 } Relay_Node;
 
 /** A directed, typed wire between an output and an input port. */
@@ -230,12 +250,25 @@ size_t relay_node_definition_count(void);
 /** Return a definition by registry index, or NULL when out of range. */
 const Relay_NodeDefinition *relay_node_definition_at(size_t index);
 
+/** Return properties implemented by every node instance. */
+const Relay_NodePropertyDefinition *relay_node_universal_properties(
+    size_t *count);
+
+/** Return the number of supported deterministic Timer intervals. */
+size_t relay_timer_interval_count(void);
+
+/** Return one supported Timer interval in simulation steps, or zero. */
+int64_t relay_timer_interval_at(size_t index);
+
 /** Return the stable display name for a fixed graph port type. */
 const char *relay_node_port_type_name(Relay_NodePortType type);
 
 /** Return whether an output type may connect to an input type. */
 bool relay_node_port_types_compatible(Relay_NodePortType source_type,
     Relay_NodePortType destination_type);
+
+/** Return whether values of this type represent one-step deliveries or events. */
+bool relay_node_port_type_is_transient(Relay_NodePortType type);
 
 /** Read a script-visible property from a node instance. */
 bool relay_node_property_get(const Relay_Node *node, const char *key,

@@ -3,88 +3,200 @@
 
 #include <string.h>
 
-/** Verify clock-driven coal production, typed wires, and script properties. */
+/** Verify one fixed-rate source definition and its universal script contract. */
+static bool relay_test_source_definition(Relay_NodeDefinitionId id,
+    const char *key, Relay_NodePortType output_type)
+{
+    const Relay_NodeDefinition *definition = relay_node_definition_find(id);
+    Relay_NodeValue value;
+    Relay_NodeValueType value_type;
+    Relay_NodeWorld world = {0};
+    Relay_Node *node;
+    Relay_NodeId node_id;
+    bool valid;
+
+    if (definition == NULL || strcmp(definition->key, key) != 0 ||
+        definition->input_count != 0 || definition->output_count != 1 ||
+        definition->outputs[0].type != output_type ||
+        definition->property_count != 1 ||
+        strcmp(definition->properties[0].key, "node.enabled") != 0 ||
+        definition->simulation.behavior !=
+            RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE ||
+        definition->simulation.interval_steps !=
+            RELAY_SOURCE_MINER_INTERVAL_STEPS ||
+        definition->simulation.output_port_index != 0 ||
+        definition->simulation.output_amount != 1 ||
+        !relay_node_world_init(&world)) {
+        return false;
+    }
+    node_id = relay_node_world_create(&world, id, 0, 0);
+    node = relay_node_world_find(&world, node_id);
+    valid = node != NULL &&
+        relay_node_property_get(node, "node.enabled", &value, &value_type) &&
+        value_type == RELAY_NODE_VALUE_BOOLEAN && value.boolean &&
+        !relay_node_property_get(node, "process.progress", &value,
+            &value_type) &&
+        !relay_node_property_get(node, "resource.coal", &value, &value_type);
+    relay_node_world_shutdown(&world);
+    return valid;
+}
+
+/** Verify autonomous miners, Timer behavior, shop data, and typed wires. */
 int relay_game_test(void)
 {
+    static const Relay_NodeDefinitionId miner_ids[] = {
+        RELAY_NODE_DEFINITION_COAL_MINER,
+        RELAY_NODE_DEFINITION_IRON_MINER,
+        RELAY_NODE_DEFINITION_COPPER_MINER,
+        RELAY_NODE_DEFINITION_STONE_MINER
+    };
+    static const char *miner_keys[] = {
+        "source.coal_miner",
+        "source.iron_miner",
+        "source.copper_miner",
+        "source.stone_miner"
+    };
+    static const Relay_NodePortType miner_types[] = {
+        RELAY_NODE_PORT_TYPE_COAL,
+        RELAY_NODE_PORT_TYPE_IRON_ORE,
+        RELAY_NODE_PORT_TYPE_COPPER_ORE,
+        RELAY_NODE_PORT_TYPE_STONE
+    };
     Relay_Game game = {0};
     Relay_ScriptRuntime scripts = {0};
     Relay_Node *miner;
-    Relay_Node *clock;
+    Relay_Node *timer;
     Relay_NodeValue value;
     Relay_NodeValueType value_type;
     Relay_NodeRenderCard card;
-    const Relay_NodeDefinition *clock_definition;
-    Relay_NodeVisual clock_port_visual;
+    const Relay_NodeDefinition *timer_definition;
+    Relay_NodeVisual trigger_port_visual;
     Relay_NodeVisual coal_port_visual;
+    Relay_NodeId source_node_ids[4] = {0};
+    Relay_NodeId timer_id;
     size_t index;
 
-    clock_definition = relay_node_definition_find(RELAY_NODE_DEFINITION_CLOCK);
-    clock_port_visual = relay_node_renderer_port_visual(
-        RELAY_NODE_PORT_TYPE_CLOCK);
+    timer_definition = relay_node_definition_find(RELAY_NODE_DEFINITION_TIMER);
+    trigger_port_visual = relay_node_renderer_port_visual(
+        RELAY_NODE_PORT_TYPE_TRIGGER);
     coal_port_visual = relay_node_renderer_port_visual(RELAY_NODE_PORT_TYPE_COAL);
     if (!relay_script_runtime_init(&scripts,
             RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT) ||
         !relay_game_init(&game, &scripts) || game.currency != 100 ||
-        game.nodes.count != 1 ||
-        relay_node_definition_find_key("process.coal_miner") == NULL ||
-        clock_definition == NULL || clock_definition->output_count != 1 ||
-        clock_definition->outputs[0].type != RELAY_NODE_PORT_TYPE_CLOCK ||
-        strcmp(clock_definition->outputs[0].key, "clock") != 0 ||
-        clock_port_visual.color == coal_port_visual.color) {
+        game.nodes.count != 1 || relay_node_definition_count() != 5 ||
+        relay_game_shop_offer_count() != 5 || timer_definition == NULL ||
+        timer_definition->simulation.behavior != RELAY_NODE_BEHAVIOR_TIMER ||
+        timer_definition->output_count != 1 ||
+        timer_definition->outputs[0].type != RELAY_NODE_PORT_TYPE_TRIGGER ||
+        strcmp(timer_definition->outputs[0].key, "trigger") != 0 ||
+        trigger_port_visual.color == coal_port_visual.color) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
     }
+    for (index = 0; index < sizeof(miner_ids) / sizeof(miner_ids[0]);
+            index++) {
+        const Relay_ShopOffer *offer = relay_game_shop_offer_at(index + 1);
+
+        if (!relay_test_source_definition(miner_ids[index],
+                miner_keys[index], miner_types[index]) ||
+            offer == NULL || offer->definition_id != miner_ids[index]) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
     miner = &game.nodes.nodes[0];
+    source_node_ids[0] = miner->id;
     card = relay_node_renderer_card(miner);
-    if (card.definition == NULL || card.definition->input_count != 2 ||
-        card.definition->output_count != 1 || card.height != 7 ||
+    if (card.definition == NULL || card.definition->input_count != 0 ||
+        card.definition->output_count != 1 || card.height != 6 ||
         relay_game_handle_input(&game, RELAY_GAME_INPUT_CONFIRM) !=
             RELAY_GAME_ACTION_PURCHASED || game.nodes.count != 2) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
     }
-    clock = &game.nodes.nodes[1];
-    if (clock->definition_id != RELAY_NODE_DEFINITION_CLOCK ||
-        game.focused_node_id != clock->id ||
+    timer = &game.nodes.nodes[1];
+    timer_id = timer->id;
+    if (timer->definition_id != RELAY_NODE_DEFINITION_TIMER ||
+        game.focused_node_id != timer->id ||
+        relay_game_connect_nodes(&game, timer->id, 0, miner->id, 0) ||
         relay_game_connect_nodes(&game, miner->id, 0, miner->id, 0) ||
-        !relay_game_connect_nodes(&game,
-            clock->id, 0, miner->id, 0) || !relay_game_connect_nodes(&game,
-            miner->id, 0, miner->id, 1) || !relay_node_property_get(clock,
-            "clock.period", &value, &value_type) ||
-        value_type != RELAY_NODE_VALUE_INTEGER || value.integer != 2) {
+        !relay_node_property_get(timer, "timer.interval_steps", &value,
+            &value_type) ||
+        value_type != RELAY_NODE_VALUE_INTEGER ||
+        value.integer != RELAY_TIMER_DEFAULT_INTERVAL_STEPS) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
     }
-    for (index = 0; index < 34; index++) {
+    value.boolean = false;
+    if (!relay_node_property_set(miner, "node.enabled",
+            RELAY_NODE_VALUE_BOOLEAN, value) ||
+        !relay_game_step(&game) || miner->progress != 0) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    value.boolean = true;
+    if (!relay_node_property_set(miner, "node.enabled",
+            RELAY_NODE_VALUE_BOOLEAN, value)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    for (index = 1; index < sizeof(miner_ids) / sizeof(miner_ids[0]);
+            index++) {
+        source_node_ids[index] = relay_node_world_create(&game.nodes,
+            miner_ids[index], (int64_t)index * 30, 0);
+        if (source_node_ids[index] == 0) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
+    miner = relay_node_world_find(&game.nodes, source_node_ids[0]);
+    timer = relay_node_world_find(&game.nodes, timer_id);
+    if (miner == NULL || timer == NULL) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    for (index = 0; index < RELAY_SOURCE_MINER_INTERVAL_STEPS; index++) {
         if (!relay_game_step(&game)) {
             relay_game_shutdown(&game);
             relay_script_runtime_shutdown(&scripts);
             return 1;
         }
     }
-    if (!relay_node_property_get(miner, "resource.coal", &value, &value_type) ||
-        value.integer != 1 || miner->progress != 0 || miner->fuel_coal != 1 ||
-        relay_game_connect_nodes(&game, miner->id, 0, clock->id, 0)) {
+    for (index = 0; index < sizeof(source_node_ids) /
+            sizeof(source_node_ids[0]); index++) {
+        const Relay_Node *source = relay_node_world_find_const(&game.nodes,
+            source_node_ids[index]);
+
+        if (source == NULL || source->produced != 1 ||
+            source->progress != 0 || source->output_values[0] != 1) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+    }
+    if (miner->produced != 1 || miner->progress != 0 ||
+        miner->output_values[0] != 1 ||
+        game.simulation_step != RELAY_SOURCE_MINER_INTERVAL_STEPS + 1 ||
+        !relay_node_property_get(timer, "timer.triggers", &value,
+            &value_type) || value.integer != 1 ||
+        relay_game_connect_nodes(&game, miner->id, 0, timer->id, 0) ||
+        !relay_game_step(&game) || miner->output_values[0] != 0 ||
+        miner->progress != 1) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
     }
-    if (relay_game_handle_input(&game, RELAY_GAME_INPUT_CONFIRM) !=
-            RELAY_GAME_ACTION_PURCHASED || !relay_game_connect_nodes(&game,
-            game.focused_node_id, 0, miner->id, 0) ||
-        relay_node_world_connection_to(&game.nodes, miner->id, 0) == NULL ||
-        relay_node_world_connection_to(&game.nodes, miner->id, 0)->source_node_id !=
-            game.focused_node_id) {
-        relay_game_shutdown(&game);
-        relay_script_runtime_shutdown(&scripts);
-        return 1;
-    }
-    if (relay_game_handle_input(&game, RELAY_GAME_INPUT_NEXT_CLOCK_RATE) !=
-            RELAY_GAME_ACTION_NONE || relay_node_world_find(&game.nodes,
-                game.focused_node_id)->clock_period != 4 ||
+    if (relay_game_handle_input(&game,
+            RELAY_GAME_INPUT_NEXT_TIMER_INTERVAL) !=
+            RELAY_GAME_ACTION_NONE || timer->timer_interval_steps != 120 ||
         relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) !=
             RELAY_GAME_ACTION_NONE || game.active_tab !=
                 RELAY_GAME_PANEL_TAB_INSPECTOR ||
@@ -92,19 +204,15 @@ int relay_game_test(void)
             RELAY_GAME_ACTION_NONE || game.active_tab !=
                 RELAY_GAME_PANEL_TAB_BLUEPRINTS ||
         relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) !=
-            RELAY_GAME_ACTION_NONE || game.active_tab != RELAY_GAME_PANEL_TAB_SHOP ||
-        !relay_game_focus_node(&game,
-                    miner->id) || game.focused_node_id != miner->id ||
+            RELAY_GAME_ACTION_NONE ||
+        game.active_tab != RELAY_GAME_PANEL_TAB_SHOP ||
+        !relay_game_focus_node(&game, miner->id) ||
+        game.focused_node_id != miner->id ||
         game.active_tab != RELAY_GAME_PANEL_TAB_INSPECTOR ||
-        relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) !=
-            RELAY_GAME_ACTION_NONE || game.active_tab !=
-                RELAY_GAME_PANEL_TAB_BLUEPRINTS ||
-        relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_PANEL_TAB) !=
-            RELAY_GAME_ACTION_NONE || game.active_tab != RELAY_GAME_PANEL_TAB_SHOP ||
         relay_game_handle_input(&game, RELAY_GAME_INPUT_TOGGLE_MAP) !=
             RELAY_GAME_ACTION_NONE || !relay_game_back(&game) ||
-        !relay_game_move_node(&game, miner->id, -9, -7) || miner->grid_x != -9 ||
-        miner->grid_y != -7) {
+        !relay_game_move_node(&game, miner->id, -9, -7) ||
+        miner->grid_x != -9 || miner->grid_y != -7) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
