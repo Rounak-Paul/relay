@@ -99,11 +99,19 @@ static void relay_app_handle_editor_input(Relay_App *app,
     }
     if (blueprint->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT) {
         if (event->key == RELAY_TERMINAL_KEY_ESCAPE) {
-            (void)relay_game_editor_leave_mode(&app->game);
+            if (!relay_game_editor_completion_dismiss(&app->game)) {
+                (void)relay_game_editor_leave_mode(&app->game);
+            }
         } else if (event->key == RELAY_TERMINAL_KEY_UP ||
             event->key == RELAY_TERMINAL_KEY_DOWN) {
-            (void)relay_game_editor_move_vertical(&app->game,
-                event->key == RELAY_TERMINAL_KEY_UP ? -1 : 1);
+            const int direction =
+                event->key == RELAY_TERMINAL_KEY_UP ? -1 : 1;
+
+            if (!relay_game_editor_completion_move(&app->game, direction)) {
+                (void)relay_game_editor_move_vertical(&app->game, direction);
+            }
+        } else if (event->key == RELAY_TERMINAL_KEY_TAB) {
+            (void)relay_game_editor_completion_accept(&app->game);
         } else if (event->key == RELAY_TERMINAL_KEY_LEFT ||
             event->key == RELAY_TERMINAL_KEY_RIGHT) {
             (void)relay_game_editor_move_horizontal(&app->game,

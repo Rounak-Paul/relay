@@ -6,6 +6,7 @@
 int relay_game_test(void);
 int relay_blueprint_test(void);
 int relay_script_runtime_test(void);
+int relay_script_language_test(void);
 
 /** State shared by the event-bus observer regression test. */
 typedef struct Relay_EventTestState {
@@ -63,6 +64,7 @@ int main(void)
         return 12;
     }
     if (relay_script_runtime_test() != 0 ||
+        relay_script_language_test() != 0 ||
         !relay_event_bus_init(&bus)) {
         return 1;
     }

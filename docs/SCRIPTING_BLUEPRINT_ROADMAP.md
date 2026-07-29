@@ -145,9 +145,9 @@ Exit criteria:
 **Status:** core workspace implemented. Blueprint creation, typed architecture
 boundaries, nested component placement, top-level scene switching, Script-panel
 instantiation, the bounded Vim-style modal editor, transactional `:w`/`:wq`
-deployment, diagnostics, and universal Back are complete. Completion/API
-assistance, rename/parameter actions, and persistence land in their owning
-later stages.
+deployment, diagnostics, semantic highlighting, completion/API signature
+assistance, and universal Back are complete. Rename/parameter actions and
+persistence land in their owning later stages.
 
 Scope:
 

@@ -27,7 +27,7 @@ static bool relay_test_compact_architecture_source(void)
         "input(\"trigger\", Type.TRIGGER)\n"
         "output(\"trigger_out\", Type.TRIGGER)\n"
         "\n"
-        "local n3 = instance(\"source.coal_miner\", { x = 90, y = 0 })\n"
+        "local n3 = instance(source.coal_miner, { x = 90, y = 0 })\n"
         "\n"
         "function on_process(inputs, state)\n"
         "  state.activations = (state.activations or 0) + 1\n"
@@ -37,7 +37,7 @@ static bool relay_test_compact_architecture_source(void)
         "input(\"trigger\", Type.TRIGGER)\n"
         "output(\"trigger_out\", Type.TRIGGER)\n"
         "\n"
-        "local n3 = instance(\"source.coal_miner\", { x = 95, y = 0 })\n"
+        "local n3 = instance(source.coal_miner, { x = 95, y = 0 })\n"
         "\n"
         "function on_process(inputs, state)\n"
         "  state.activations = (state.activations or 0) + 1\n"
@@ -68,6 +68,53 @@ static bool relay_test_compact_architecture_source(void)
         goto cleanup;
     }
     valid = true;
+
+cleanup:
+    relay_game_shutdown(&game);
+    relay_script_runtime_shutdown(&scripts);
+    return valid;
+}
+
+/** Verify string component keys are rejected without replacing valid state. */
+static bool relay_test_reject_quoted_component_reference(void)
+{
+    static const char invalid_source[] =
+        "input(\"trigger\", Type.TRIGGER)\n"
+        "output(\"trigger_out\", Type.TRIGGER)\n"
+        "\n"
+        "local n3 = instance(\"source.coal_miner\", { x = 90, y = 0 })\n"
+        "\n"
+        "function on_process(inputs, state)\n"
+        "  return { trigger_out = inputs.trigger or 0 }\n"
+        "end\n";
+    Relay_ScriptRuntime scripts = {0};
+    Relay_Game game = {0};
+    Relay_Blueprint *blueprint;
+    uint64_t compiled_revision;
+    size_t scene_count;
+    bool valid = false;
+
+    if (!relay_script_runtime_init(&scripts,
+            RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT) ||
+        !relay_game_init(&game, &scripts) ||
+        !relay_game_create_blueprint(&game)) {
+        goto cleanup;
+    }
+    blueprint = relay_game_active_blueprint(&game);
+    if (blueprint == NULL) {
+        goto cleanup;
+    }
+    compiled_revision = blueprint->compiled_revision;
+    scene_count = blueprint->scene.count;
+    (void)memcpy(blueprint->source, invalid_source, sizeof(invalid_source));
+    blueprint->source_size = sizeof(invalid_source) - 1;
+    blueprint->revision++;
+    blueprint->dirty = true;
+    valid = !relay_blueprint_compile(&game.blueprints, blueprint) &&
+        blueprint->compiled_revision == compiled_revision &&
+        blueprint->scene.count == scene_count &&
+        strstr(blueprint->diagnostic.message,
+            "Invalid Blueprint architecture declarations") != NULL;
 
 cleanup:
     relay_game_shutdown(&game);
@@ -107,6 +154,7 @@ int relay_blueprint_test(void)
     bool activation_counts_valid = true;
 
     if (!relay_test_compact_architecture_source() ||
+        !relay_test_reject_quoted_component_reference() ||
         !relay_script_runtime_init(&scripts,
             RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT) ||
         !relay_game_init(&game, &scripts) ||
@@ -117,7 +165,9 @@ int relay_blueprint_test(void)
     }
     child = relay_game_active_blueprint(&game);
     child_id = child == NULL ? 0 : child->id;
-    if (child == NULL || child->scene.count != 2 ||
+    if (child == NULL || strcmp(child->name, "script_1") != 0 ||
+        strcmp(child->key, "script.script_1") != 0 ||
+        child->scene.count != 2 ||
         child->input_boundary_node_id == 0 ||
         child->output_boundary_node_id == 0 || !child->plan.valid ||
         child->plan.node_count != 1 ||
@@ -130,7 +180,9 @@ int relay_blueprint_test(void)
     }
     parent = relay_game_active_blueprint(&game);
     parent_id = parent == NULL ? 0 : parent->id;
-    if (parent == NULL || !relay_game_back(&game) ||
+    if (parent == NULL || strcmp(parent->name, "script_2") != 0 ||
+        strcmp(parent->key, "script.script_2") != 0 ||
+        !relay_game_back(&game) ||
         game.active_workspace != 0 ||
         !relay_game_activate_workspace(&game, 2) ||
         !relay_game_add_blueprint(&game, child_id)) {
@@ -151,7 +203,7 @@ int relay_blueprint_test(void)
         return 1;
     }
     if (strstr(parent->source,
-            "local n3 = instance(\"blueprint.script_1\", { x = 90, y = 0 })") ==
+            "local n3 = instance(script.script_1, { x = 90, y = 0 })") ==
             NULL ||
         strstr(parent->source,
             "connect(inputs.trigger, n3.inputs.trigger)") == NULL ||
@@ -159,7 +211,7 @@ int relay_blueprint_test(void)
             "connect(n3.outputs.trigger_out, outputs.trigger_out)") == NULL ||
         !relay_game_move_node(&game, child_component_id, 5, 0) ||
         strstr(parent->source,
-            "local n3 = instance(\"blueprint.script_1\", { x = 95, y = 0 })") ==
+            "local n3 = instance(script.script_1, { x = 95, y = 0 })") ==
             NULL) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);

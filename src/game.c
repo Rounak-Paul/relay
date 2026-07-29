@@ -1,4 +1,5 @@
 #include "relay/game.h"
+#include "relay/script_language.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -525,6 +526,8 @@ bool relay_game_open_editor(Relay_Game *game)
     blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_NORMAL;
     blueprint->editor_command_size = 0;
     blueprint->editor_command[0] = '\0';
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     game->editing_blueprint_id = blueprint->id;
     return true;
 }
@@ -545,6 +548,8 @@ bool relay_game_editor_insert(Relay_Game *game, uint32_t character)
     blueprint->source_size++;
     blueprint->revision++;
     blueprint->dirty = true;
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     return true;
 }
 
@@ -562,6 +567,8 @@ bool relay_game_editor_backspace(Relay_Game *game)
     blueprint->source_size--;
     blueprint->revision++;
     blueprint->dirty = true;
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     return true;
 }
 
@@ -578,6 +585,8 @@ bool relay_game_editor_delete(Relay_Game *game)
     blueprint->source_size--;
     blueprint->revision++;
     blueprint->dirty = true;
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     return true;
 }
 
@@ -592,6 +601,8 @@ bool relay_game_editor_move_horizontal(Relay_Game *game, int direction)
     }
     blueprint->cursor = direction < 0 ? blueprint->cursor - 1 :
         blueprint->cursor + 1;
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     return true;
 }
 
@@ -649,6 +660,8 @@ bool relay_game_editor_move_vertical(Relay_Game *game, int direction)
     }
     blueprint->cursor = target_start +
         (column < target_end - target_start ? column : target_end - target_start);
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     return true;
 }
 
@@ -670,6 +683,8 @@ bool relay_game_editor_move_line_boundary(Relay_Game *game, bool to_end)
         }
     }
     blueprint->cursor = boundary;
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     return true;
 }
 
@@ -681,6 +696,8 @@ bool relay_game_editor_enter_insert(Relay_Game *game)
         return false;
     }
     blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_INSERT;
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
     return true;
 }
 
@@ -708,6 +725,115 @@ bool relay_game_editor_leave_mode(Relay_Game *game)
     blueprint->editor_mode = RELAY_BLUEPRINT_EDITOR_NORMAL;
     blueprint->editor_command_size = 0;
     blueprint->editor_command[0] = '\0';
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = false;
+    return true;
+}
+
+size_t relay_game_editor_completions(const Relay_Game *game,
+    Relay_ScriptCompletion *items, size_t item_capacity,
+    size_t *replacement_start)
+{
+    const Relay_Blueprint *blueprint;
+    const char *script_names[RELAY_BLUEPRINT_CAPACITY];
+    Relay_ScriptLanguageCatalog catalog;
+    size_t index;
+    size_t script_name_count = 0;
+
+    if (game == NULL) {
+        return 0;
+    }
+    blueprint = game->editing_blueprint_id == 0 ? NULL :
+        relay_blueprint_library_find_const(&game->blueprints,
+            game->editing_blueprint_id);
+    if (blueprint == NULL ||
+        blueprint->editor_mode != RELAY_BLUEPRINT_EDITOR_INSERT ||
+        blueprint->completion_suppressed) {
+        return 0;
+    }
+    for (index = 0; index < game->blueprints.count; index++) {
+        const Relay_Blueprint *candidate =
+            &game->blueprints.blueprints[index];
+
+        if (candidate->id != blueprint->id) {
+            script_names[script_name_count++] = candidate->name;
+        }
+    }
+    catalog = (Relay_ScriptLanguageCatalog){
+        script_names, script_name_count};
+    return relay_script_language_complete(blueprint->source,
+        blueprint->source_size, blueprint->cursor, &catalog, items,
+        item_capacity, replacement_start);
+}
+
+bool relay_game_editor_completion_move(Relay_Game *game, int direction)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+    Relay_ScriptCompletion items[RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS];
+    size_t replacement_start;
+    const size_t count = relay_game_editor_completions(game, items,
+        RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS, &replacement_start);
+
+    (void)replacement_start;
+    if (count == 0 || direction == 0) {
+        return false;
+    }
+    blueprint->completion_selection = direction < 0 ?
+        (blueprint->completion_selection == 0 ? count - 1 :
+            blueprint->completion_selection - 1) :
+        (blueprint->completion_selection + 1) % count;
+    return true;
+}
+
+bool relay_game_editor_completion_accept(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+    Relay_ScriptCompletion items[RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS];
+    size_t replacement_start;
+    size_t count;
+    size_t selected;
+    size_t replacement_size;
+    size_t insertion_size;
+
+    count = relay_game_editor_completions(game, items,
+        RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS, &replacement_start);
+    if (count == 0) {
+        return false;
+    }
+    selected = blueprint->completion_selection % count;
+    replacement_size = blueprint->cursor - replacement_start;
+    insertion_size = strlen(items[selected].insert_text);
+    if (blueprint->source_size - replacement_size + insertion_size + 1 >=
+            RELAY_BLUEPRINT_SOURCE_CAPACITY) {
+        return false;
+    }
+    (void)memmove(&blueprint->source[replacement_start + insertion_size],
+        &blueprint->source[blueprint->cursor],
+        blueprint->source_size - blueprint->cursor + 1);
+    (void)memcpy(&blueprint->source[replacement_start],
+        items[selected].insert_text, insertion_size);
+    blueprint->source_size = blueprint->source_size - replacement_size +
+        insertion_size;
+    blueprint->cursor = replacement_start + insertion_size;
+    blueprint->revision++;
+    blueprint->dirty = true;
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = true;
+    return true;
+}
+
+bool relay_game_editor_completion_dismiss(Relay_Game *game)
+{
+    Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
+    Relay_ScriptCompletion items[RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS];
+    size_t replacement_start;
+
+    if (relay_game_editor_completions(game, items,
+            RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS, &replacement_start) == 0) {
+        return false;
+    }
+    blueprint->completion_selection = 0;
+    blueprint->completion_suppressed = true;
     return true;
 }
 

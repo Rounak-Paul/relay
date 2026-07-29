@@ -63,8 +63,20 @@ namespace (`Type.TRIGGER`, material types, `Type.BOOLEAN`, and `Type.INTEGER`);
 the enum is built from one runtime registry and lowercase string type
 declarations are not part of the language.
 
-`src/blueprint.c` owns stable player Blueprint IDs, dotted keys, source
-revisions, typed schemas, compiled artifacts, boundary/process definitions,
+`src/script_language.c` is the terminal-independent Blueprint language service.
+Its bounded full-source lexer classifies multiline Lua strings/comments,
+keywords, numbers, Relay callables, type constants, definition namespaces,
+members, and operators. The immutable built-in API catalog plus a bounded
+caller-owned catalog of live `script.*` names drives context-filtered completion
+and nested, string-aware signature help. `Relay_Game` assembles that dynamic
+catalog so insertion and both terminal renderers consume identical results.
+`Relay_Blueprint` owns only transient selection and dismissal state; game editor
+commands own insertion. Insert-mode Up/Down selects an active completion, Tab
+accepts it, and Escape dismisses assistance before leaving Insert mode.
+
+`src/blueprint.c` owns stable player Blueprint IDs, canonical script names,
+dotted definition symbols, source revisions, typed schemas, compiled artifacts,
+boundary/process definitions,
 top-level architecture scenes, and immutable flattened plans. Every scene owns
 `Module Inputs` and `Module Outputs`; only actual built-in or nested components
 appear between them. The Blueprint's Lua function is an implicit internal
@@ -76,11 +88,17 @@ Runtime execution remains one graph and one previous-step wire model, never a
 nested or scripting-only simulator.
 
 The source buffer contains ordinary top-level Lua-shaped architecture
-declarations: `local component = instance(...)` plus typed `connect(...)` port
-maps through module `inputs`/`outputs` and component `.inputs`/`.outputs`
-namespaces. The Blueprint compiler blanks these declarative lines from the Lua
-runtime chunk while preserving diagnostic line numbers; the architecture parser
-owns them. `on_process(inputs, state)` is the deterministic activation observer.
+declarations: `local component = instance(namespace.member, ...)` plus typed
+`connect(...)` port maps through module `inputs`/`outputs` and component
+`.inputs`/`.outputs` namespaces. Definition references are unquoted symbols,
+never string keys: immutable built-ins use `source.*` and `control.*`, while
+reusable modules use `script.<blueprint_name>`. Blueprint names and both symbol
+segments use strict lowercase snake_case; the parser rejects quoted references,
+spaces, uppercase characters, repeated/trailing underscores, and additional
+namespace separators transactionally. The Blueprint compiler blanks these
+declarative lines from the Lua runtime chunk while preserving diagnostic line
+numbers; the architecture parser owns them. `on_process(inputs, state)` is the
+deterministic activation observer.
 Successful graph component creation, connection replacement, and movement
 regenerate these declarations and recompile the artifact and plan
 transactionally. Regeneration canonicalizes the architecture boundary to one

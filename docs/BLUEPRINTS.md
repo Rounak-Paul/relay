@@ -43,14 +43,14 @@ nodes. Each module process in each placement owns independent persistent state.
 
 ## Visual port mapping
 
-For a parent `Script 1` containing child `Script 2`, the complete visual
+For a parent `script_1` containing child `script_2`, the complete visual
 equivalent of an HDL component port map is:
 
 ```text
-Script 1 Module Inputs.trigger
-    -> Script 2.trigger
-Script 2.trigger_out
-    -> Script 1 Module Outputs.trigger_out
+script_1 Module Inputs.trigger
+    -> script_2.trigger
+script_2.trigger_out
+    -> script_1 Module Outputs.trigger_out
 ```
 
 Drag may begin from either the input or output port row. The terminal normalizes
@@ -73,17 +73,30 @@ do not leave partial runtime nodes or wires.
 The source owns canonical top-level architecture declarations:
 
 ```lua
-local n3 = instance("blueprint.script_2", { x = 96, y = 0 })
+local n3 = instance(script.script_2, { x = 96, y = 0 })
 connect(inputs.trigger, n3.inputs.trigger)
 connect(n3.outputs.trigger_out, outputs.trigger_out)
 ```
 
 This is Relay's Lua-shaped equivalent of VHDL component declarations and port
-maps. `instance` returns a typed component handle. `inputs` and `outputs` are
-the module boundary namespaces; each component exposes explicit `.inputs` and
+maps. Definition references are symbols, not strings. Every definition uses one
+canonical `namespace.member` identifier: built-in miners live under `source`,
+control nodes under `control`, and reusable player modules under `script`.
+Blueprint names and both symbol segments are lowercase snake_case identifiers;
+spaces, uppercase letters, repeated underscores, quoted definition keys, and
+additional namespace separators are rejected. Examples include:
+
+```lua
+local coal = instance(source.coal_miner, { x = 0, y = 0 })
+local timer = instance(control.timer, { x = -30, y = 0 })
+local refinery = instance(script.ore_refinery, { x = 30, y = 0 })
+```
+
+`instance` returns a typed component handle. `inputs` and `outputs` are the
+module boundary namespaces; each component exposes explicit `.inputs` and
 `.outputs` namespaces. The local variable is the component's stable
-architecture key, while definition and port keys are stable data rather than
-display labels.
+architecture key, while definition and port keys are stable schema identifiers
+rather than display labels.
 
 These declarations are compile-time Blueprint DSL: Relay removes their text
 from the runtime Lua chunk while retaining line positions for diagnostics.
@@ -96,6 +109,10 @@ through the same parser and typed graph validation. Component declarations must
 precede their port maps. Invalid keys, directions, types, duplicate input
 sources, self-imports, or dependency cycles leave both
 the previous graph and compiled plan installed.
+
+The editor highlights definition namespaces separately from members and
+completes `source.*`, `control.*`, and every eligible live `script.*` Blueprint
+name. It omits the current Blueprint because self-imports are invalid.
 
 Relay is a permanent pinned tab. Creating a Blueprint opens its tab beside
 Relay. `C` closes the active Blueprint tab and returns to Relay; closing a tab
@@ -165,8 +182,11 @@ The built-in editor is a compact modal editor:
 - `h`/`j`/`k`/`l` or the arrow keys move in normal mode;
 - `0`/`$` or Home/End move to line boundaries;
 - `x` or Delete removes the character under the cursor;
-- insert mode accepts text, Enter, Backspace, Delete, arrows, Home, and End;
-- Escape returns insert or command mode to normal mode;
+- insert mode provides semantic highlighting for Lua, Relay APIs, and `Type`;
+- completions appear while typing; Up/Down selects and Tab inserts an item;
+- recognized calls show their parameter signature and active argument;
+- insert mode also accepts Enter, Backspace, Delete, arrows, Home, and End;
+- Escape dismisses completion first, then returns insert mode to normal mode;
 - `:w` validates, compiles, and deploys;
 - `:wq` deploys and returns to the graph;
 - `:q` returns while retaining the current source as an undeployed draft; and

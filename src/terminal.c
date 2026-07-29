@@ -2,6 +2,7 @@
 
 #include "relay/game.h"
 #include "relay/node_renderer.h"
+#include "relay/script_language.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -137,6 +138,27 @@ static const char *relay_terminal_editor_mode_label(
     case RELAY_BLUEPRINT_EDITOR_COMMAND: return "COMMAND";
     }
     return "UNKNOWN";
+}
+
+/** Return the semantic token covering one source byte, or the default class. */
+static Relay_ScriptTokenKind relay_terminal_editor_token_at(
+    const Relay_ScriptToken *tokens, size_t token_count, size_t offset)
+{
+    size_t low = 0;
+    size_t high = token_count;
+
+    while (low < high) {
+        const size_t middle = low + (high - low) / 2;
+
+        if (offset < tokens[middle].start) {
+            high = middle;
+        } else if (offset >= tokens[middle].start + tokens[middle].length) {
+            low = middle + 1;
+        } else {
+            return tokens[middle].kind;
+        }
+    }
+    return RELAY_SCRIPT_TOKEN_DEFAULT;
 }
 
 /** Fully resolved directional path shared by persistent and live wires. */
@@ -783,14 +805,36 @@ static bool relay_terminal_draw_node_map(HANDLE output, const Relay_Node *node,
 }
 
 /** Draw the active blueprint source editor in the Windows console backend. */
+static const char *relay_terminal_editor_ansi(Relay_ScriptTokenKind kind)
+{
+    switch (kind) {
+    case RELAY_SCRIPT_TOKEN_KEYWORD: return "\x1b[35m";
+    case RELAY_SCRIPT_TOKEN_STRING: return "\x1b[32m";
+    case RELAY_SCRIPT_TOKEN_NUMBER: return "\x1b[33m";
+    case RELAY_SCRIPT_TOKEN_COMMENT: return "\x1b[90m";
+    case RELAY_SCRIPT_TOKEN_FUNCTION: return "\x1b[36m";
+    case RELAY_SCRIPT_TOKEN_TYPE: return "\x1b[96m";
+    case RELAY_SCRIPT_TOKEN_NAMESPACE: return "\x1b[33m";
+    case RELAY_SCRIPT_TOKEN_MEMBER: return "\x1b[34m";
+    case RELAY_SCRIPT_TOKEN_OPERATOR: return "\x1b[37m";
+    case RELAY_SCRIPT_TOKEN_DEFAULT: return "\x1b[37m";
+    }
+    return "\x1b[37m";
+}
+
+/** Draw syntax overlays and language assistance for the Windows editor. */
 static bool relay_terminal_draw_editor(HANDLE output, int divider_x, int height,
-    const Relay_Blueprint *blueprint)
+    const Relay_Game *game, const Relay_Blueprint *blueprint)
 {
     const size_t visible_lines = height > 4 ? (size_t)(height - 4) : 0;
     const size_t text_capacity = divider_x > 9 ?
         (size_t)(divider_x - 9) : 0;
     const Relay_TerminalEditorView view = relay_terminal_editor_view(blueprint,
         visible_lines, text_capacity);
+    Relay_ScriptToken tokens[RELAY_SCRIPT_LANGUAGE_MAX_TOKENS];
+    const size_t token_count = relay_script_language_tokenize(
+        blueprint->source, blueprint->source_size, tokens,
+        RELAY_SCRIPT_LANGUAGE_MAX_TOKENS);
     size_t row;
 
     for (row = 0; row < visible_lines; row++) {
@@ -817,6 +861,32 @@ static bool relay_terminal_draw_editor(HANDLE output, int divider_x, int height,
         if (!relay_terminal_write_at(output, 1, 2 + (int)row, line)) {
             return false;
         }
+        {
+            size_t column = 0;
+
+            while (column < length) {
+                const Relay_ScriptTokenKind kind =
+                    relay_terminal_editor_token_at(tokens, token_count,
+                        start + column);
+                size_t segment_end = column + 1;
+                char segment[256];
+
+                while (segment_end < length &&
+                    relay_terminal_editor_token_at(tokens, token_count,
+                        start + segment_end) == kind) {
+                    segment_end++;
+                }
+                (void)snprintf(segment, sizeof(segment), "%s%.*s\x1b[0m",
+                    relay_terminal_editor_ansi(kind),
+                    (int)(segment_end - column),
+                    &blueprint->source[start + column]);
+                if (!relay_terminal_write_at(output, 8 + (int)column,
+                        2 + (int)row, segment)) {
+                    return false;
+                }
+                column = segment_end;
+            }
+        }
     }
     if (view.cursor_line >= view.first_line &&
         view.cursor_line < view.first_line + visible_lines) {
@@ -832,6 +902,48 @@ static bool relay_terminal_draw_editor(HANDLE output, int divider_x, int height,
         if (cursor_x < divider_x &&
             !relay_terminal_write_at(output, cursor_x, cursor_y, cursor)) {
             return false;
+        }
+    }
+    if (blueprint->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT &&
+        divider_x >= 46) {
+        Relay_ScriptCompletion completions[
+            RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS];
+        Relay_ScriptSignature signature;
+        size_t replacement_start;
+        const size_t count = blueprint->completion_suppressed ? 0 :
+            relay_game_editor_completions(game, completions,
+                RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS, &replacement_start);
+        const size_t selected = count == 0 ? 0 :
+            blueprint->completion_selection % count;
+        const size_t first = selected < 5 ? 0 : selected - 4;
+        int popup_y = 3 + (int)(view.cursor_line - view.first_line);
+        size_t index;
+
+        (void)replacement_start;
+        if (relay_script_language_signature(blueprint->source,
+                blueprint->source_size, blueprint->cursor, &signature) &&
+            popup_y < height - 2) {
+            char help[96];
+
+            (void)snprintf(help, sizeof(help),
+                "\x1b[30;46m %.27s  p%zu \x1b[0m", signature.label,
+                signature.active_parameter + 1);
+            if (!relay_terminal_write_at(output, 8, popup_y++, help)) {
+                return false;
+            }
+        }
+        for (index = first; index < count && index < first + 5 &&
+                popup_y < height - 2; index++, popup_y++) {
+            char item[128];
+            const bool item_selected = index == selected;
+
+            (void)snprintf(item, sizeof(item),
+                "%s %-13.13s %-21.21s \x1b[0m",
+                item_selected ? "\x1b[30;47m" : "\x1b[37;40m",
+                completions[index].label, completions[index].detail);
+            if (!relay_terminal_write_at(output, 8, popup_y, item)) {
+                return false;
+            }
         }
     }
     return true;
@@ -870,7 +982,8 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
         return false;
     }
     if (editing != NULL) {
-        if (!relay_terminal_draw_editor(output, divider_x, height, editing)) {
+        if (!relay_terminal_draw_editor(output, divider_x, height, game,
+                editing)) {
             return false;
         }
     } else if (!relay_terminal_draw_grid(output, divider_x, height, terminal)) {
@@ -1097,7 +1210,7 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
         relay_terminal_write_at(output, divider_x + 2, height - 2,
             editing != NULL &&
                 editing->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT ?
-                    "type/edit  Enter newline" :
+                    "Tab complete  Enter newline" :
             editing != NULL &&
                 editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
                     "Enter: run  Esc: cancel" :
@@ -1862,14 +1975,36 @@ static void relay_terminal_draw_node_map(const Relay_Node *node,
 }
 
 /** Draw the active blueprint source editor in the Termbox backend. */
+static uintattr_t relay_terminal_editor_color(Relay_ScriptTokenKind kind)
+{
+    switch (kind) {
+    case RELAY_SCRIPT_TOKEN_KEYWORD: return TB_MAGENTA | TB_BOLD;
+    case RELAY_SCRIPT_TOKEN_STRING: return TB_GREEN;
+    case RELAY_SCRIPT_TOKEN_NUMBER: return TB_YELLOW;
+    case RELAY_SCRIPT_TOKEN_COMMENT: return TB_BLACK | TB_BOLD;
+    case RELAY_SCRIPT_TOKEN_FUNCTION: return TB_CYAN | TB_BOLD;
+    case RELAY_SCRIPT_TOKEN_TYPE: return TB_CYAN;
+    case RELAY_SCRIPT_TOKEN_NAMESPACE: return TB_YELLOW | TB_BOLD;
+    case RELAY_SCRIPT_TOKEN_MEMBER: return TB_BLUE | TB_BOLD;
+    case RELAY_SCRIPT_TOKEN_OPERATOR: return TB_WHITE;
+    case RELAY_SCRIPT_TOKEN_DEFAULT: return TB_WHITE;
+    }
+    return TB_WHITE;
+}
+
+/** Draw syntax overlays and language assistance for the Termbox editor. */
 static void relay_terminal_draw_editor(int divider_x, int height,
-    const Relay_Blueprint *blueprint)
+    const Relay_Game *game, const Relay_Blueprint *blueprint)
 {
     const size_t visible_lines = height > 4 ? (size_t)(height - 4) : 0;
     const size_t text_capacity = divider_x > 9 ?
         (size_t)(divider_x - 9) : 0;
     const Relay_TerminalEditorView view = relay_terminal_editor_view(blueprint,
         visible_lines, text_capacity);
+    Relay_ScriptToken tokens[RELAY_SCRIPT_LANGUAGE_MAX_TOKENS];
+    const size_t token_count = relay_script_language_tokenize(
+        blueprint->source, blueprint->source_size, tokens,
+        RELAY_SCRIPT_LANGUAGE_MAX_TOKENS);
     size_t row;
 
     for (row = 0; row < visible_lines; row++) {
@@ -1893,6 +2028,19 @@ static void relay_terminal_draw_editor(int divider_x, int height,
         (void)tb_printf(1, 2 + (int)row, TB_WHITE, TB_DEFAULT,
             "%4zu │ %.*s", line_number + 1, (int)length,
             &blueprint->source[start]);
+        {
+            size_t column;
+
+            for (column = 0; column < length; column++) {
+                const Relay_ScriptTokenKind kind =
+                    relay_terminal_editor_token_at(tokens, token_count,
+                        start + column);
+
+                (void)tb_set_cell(8 + (int)column, 2 + (int)row,
+                    (uint32_t)(unsigned char)blueprint->source[start + column],
+                    relay_terminal_editor_color(kind), TB_DEFAULT);
+            }
+        }
     }
     if (view.cursor_line >= view.first_line &&
         view.cursor_line < view.first_line + visible_lines) {
@@ -1908,6 +2056,40 @@ static void relay_terminal_draw_editor(int divider_x, int height,
         if (cursor_x < divider_x) {
             (void)tb_set_cell(cursor_x, cursor_y, character, TB_BLACK | TB_BOLD,
                 TB_CYAN);
+        }
+    }
+    if (blueprint->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT &&
+        divider_x >= 46) {
+        Relay_ScriptCompletion completions[
+            RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS];
+        Relay_ScriptSignature signature;
+        size_t replacement_start;
+        const size_t count = blueprint->completion_suppressed ? 0 :
+            relay_game_editor_completions(game, completions,
+                RELAY_SCRIPT_LANGUAGE_MAX_COMPLETIONS, &replacement_start);
+        const size_t selected = count == 0 ? 0 :
+            blueprint->completion_selection % count;
+        const size_t first = selected < 5 ? 0 : selected - 4;
+        int popup_y = 3 + (int)(view.cursor_line - view.first_line);
+        size_t index;
+
+        (void)replacement_start;
+        if (relay_script_language_signature(blueprint->source,
+                blueprint->source_size, blueprint->cursor, &signature) &&
+            popup_y < height - 2) {
+            (void)tb_printf(8, popup_y++, TB_BLACK | TB_BOLD, TB_CYAN,
+                " %.27s  p%zu ", signature.label,
+                signature.active_parameter + 1);
+        }
+        for (index = first; index < count && index < first + 5 &&
+                popup_y < height - 2; index++, popup_y++) {
+            const bool item_selected = index == selected;
+
+            (void)tb_printf(8, popup_y,
+                item_selected ? TB_BLACK | TB_BOLD : TB_WHITE,
+                item_selected ? TB_WHITE : TB_BLACK,
+                " %-13.13s %-21.21s ", completions[index].label,
+                completions[index].detail);
         }
     }
 }
@@ -1962,7 +2144,7 @@ static void relay_terminal_draw_split(int width, int height,
     }
     relay_terminal_draw_workspace_tabs(divider_x, game);
     if (editing != NULL) {
-        relay_terminal_draw_editor(divider_x, height, editing);
+        relay_terminal_draw_editor(divider_x, height, game, editing);
     } else {
         relay_terminal_draw_grid(divider_x, height, terminal);
     }
@@ -2142,7 +2324,7 @@ static void relay_terminal_draw_split(int width, int height,
     relay_terminal_draw_text(divider_x + 2, height - 2, TB_YELLOW,
         editing != NULL &&
             editing->editor_mode == RELAY_BLUEPRINT_EDITOR_INSERT ?
-                "type/edit  Enter newline" :
+                "Tab complete  Enter newline" :
         editing != NULL &&
             editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
                 "Enter: run  Esc: cancel" :

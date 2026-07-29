@@ -89,6 +89,7 @@ add_executable(relay
     src/node.c
     src/node_renderer.c
     src/script_runtime.c
+    src/script_language.c
     src/terminal.c
 )
 
@@ -140,7 +141,9 @@ if(BUILD_TESTING)
         src/node.c
         src/node_renderer.c
         src/script_runtime.c
+        src/script_language.c
         tests/script_runtime_test.c
+        tests/script_language_test.c
     )
     target_include_directories(relay_runtime_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(relay_runtime_test PRIVATE Threads::Threads relay_lua)

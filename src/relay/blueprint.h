@@ -112,7 +112,9 @@ typedef struct Relay_Blueprint {
     Relay_ScriptDiagnostic diagnostic;
     char editor_command[32];
     size_t editor_command_size;
+    size_t completion_selection;
     Relay_BlueprintEditorMode editor_mode;
+    bool completion_suppressed;
     bool editor_open;
     bool workspace_open;
     bool dirty;

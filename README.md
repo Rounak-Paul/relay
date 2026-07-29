@@ -97,7 +97,9 @@ the active scene.
 Press `E` in a Blueprint scene, or while one of its module nodes is focused, to
 open the modal code editor. Normal mode supports `h`/`j`/`k`/`l`, `0`, `$`,
 `x`, `i`, `a`, `I`, `A`, and `o`. Escape returns insert or command mode to
-normal mode. Use `:w` to validate, compile, and transactionally deploy, `:wq`
+normal mode. Insert mode has built-in semantic highlighting, completion with
+Up/Down and Tab, and live signature help for Relay and safe Lua APIs. Use `:w`
+to validate, compile, and transactionally deploy, `:wq`
 to deploy and return, or `:q` to return while retaining the draft. A failed
 compile leaves the prior installed revision running and shows the diagnostic in
 the right panel. Escape from normal mode returns to the graph without closing

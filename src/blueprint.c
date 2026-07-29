@@ -188,7 +188,7 @@ static bool relay_blueprint_source_append_scene(
         }
         if (node->definition == NULL || node->local_key[0] == '\0' ||
             !relay_blueprint_source_append(candidate, candidate_size,
-                "local %s = instance(\"%s\", { x = %lld, y = %lld })\n",
+                "local %s = instance(%s, { x = %lld, y = %lld })\n",
                 node->local_key, node->definition->key,
                 (long long)node->grid_x, (long long)node->grid_y)) {
             return false;
@@ -423,6 +423,43 @@ static char *relay_blueprint_token_trim(char *token)
     return token;
 }
 
+/** Return whether one namespace or member is canonical lowercase snake_case. */
+static bool relay_blueprint_snake_name_is_valid(const char *name,
+    size_t length)
+{
+    size_t index;
+    bool underscore = false;
+
+    if (length == 0 || !islower((unsigned char)name[0])) {
+        return false;
+    }
+    for (index = 1; index < length; index++) {
+        if (name[index] == '_') {
+            if (underscore || index + 1 == length) {
+                return false;
+            }
+            underscore = true;
+        } else {
+            if (!islower((unsigned char)name[index]) &&
+                !isdigit((unsigned char)name[index])) {
+                return false;
+            }
+            underscore = false;
+        }
+    }
+    return true;
+}
+
+/** Validate one canonical namespace.member component definition symbol. */
+static bool relay_blueprint_definition_symbol_is_valid(const char *symbol)
+{
+    const char *dot = strchr(symbol, '.');
+
+    return dot != NULL && dot != symbol && strchr(dot + 1, '.') == NULL &&
+        relay_blueprint_snake_name_is_valid(symbol, (size_t)(dot - symbol)) &&
+        relay_blueprint_snake_name_is_valid(dot + 1, strlen(dot + 1));
+}
+
 /** Parse one directional endpoint into a component key and port key. */
 static bool relay_blueprint_endpoint_parse(const char *endpoint, bool source,
     char *instance, size_t instance_capacity, char *port,
@@ -512,10 +549,11 @@ static bool relay_blueprint_scene_from_source(Relay_BlueprintLibrary *library,
             Relay_Node *node;
 
             if (sscanf(statement,
-                    "local %31s = instance(\"%63[^\"]\", { x = %lld, y = %lld })%n",
+                    "local %31s = instance(%63[a-z0-9_.], { x = %lld, y = %lld })%n",
                     local_key, definition_key, &grid_x, &grid_y,
                     &consumed) != 4 || statement[consumed] != '\0' ||
                 !relay_blueprint_local_key_is_valid(local_key) ||
+                !relay_blueprint_definition_symbol_is_valid(definition_key) ||
                 strcmp(local_key, "inputs") == 0 ||
                 strcmp(local_key, "outputs") == 0 ||
                 strcmp(local_key, "input") == 0 ||
@@ -1188,10 +1226,10 @@ Relay_BlueprintId relay_blueprint_library_create(
     blueprint = &library->blueprints[library->count];
     *blueprint = (Relay_Blueprint){0};
     blueprint->id = library->next_id++;
-    (void)snprintf(blueprint->name, sizeof(blueprint->name), "Script %llu",
+    (void)snprintf(blueprint->name, sizeof(blueprint->name), "script_%llu",
         (unsigned long long)blueprint->id);
     (void)snprintf(blueprint->key, sizeof(blueprint->key),
-        "blueprint.script_%llu", (unsigned long long)blueprint->id);
+        "script.script_%llu", (unsigned long long)blueprint->id);
     (void)memcpy(blueprint->source, relay_blueprint_default_source,
         source_size + 1);
     blueprint->source_size = source_size;

@@ -3,6 +3,7 @@
 
 #include "relay/blueprint.h"
 #include "relay/node.h"
+#include "relay/script_language.h"
 #include "relay/script_runtime.h"
 
 #include <stdbool.h>
@@ -119,6 +120,11 @@ bool relay_game_open_editor(Relay_Game *game);
 /** Return the blueprint currently owned by the code editor. */
 Relay_Blueprint *relay_game_editing_blueprint(Relay_Game *game);
 
+/** Query completion using built-in and live reusable-script symbols. */
+size_t relay_game_editor_completions(const Relay_Game *game,
+    Relay_ScriptCompletion *items, size_t item_capacity,
+    size_t *replacement_start);
+
 /** Insert one ASCII code point at the editor cursor. */
 bool relay_game_editor_insert(Relay_Game *game, uint32_t character);
 
@@ -145,6 +151,15 @@ bool relay_game_editor_enter_command(Relay_Game *game);
 
 /** Return insert or command mode to normal mode. */
 bool relay_game_editor_leave_mode(Relay_Game *game);
+
+/** Move the active code-completion selection by one item. */
+bool relay_game_editor_completion_move(Relay_Game *game, int direction);
+
+/** Replace the current identifier prefix with the selected completion. */
+bool relay_game_editor_completion_accept(Relay_Game *game);
+
+/** Suppress automatic completion until the source or cursor changes. */
+bool relay_game_editor_completion_dismiss(Relay_Game *game);
 
 /** Append one printable character to the active editor command. */
 bool relay_game_editor_command_insert(Relay_Game *game, uint32_t character);
