@@ -7,6 +7,12 @@
 #include <string.h>
 
 static const char relay_blueprint_default_source[] =
+    "-- Relay Blueprint\n"
+    "-- Ports: input/output with Type.*.\n"
+    "-- Components: source.*, control.*, or script.*.\n"
+    "-- on_process gets read-only inputs; state persists per instance.\n"
+    "-- Return declared outputs. Save with :w.\n"
+    "\n"
     "input(\"trigger\", Type.TRIGGER)\n"
     "output(\"trigger_out\", Type.TRIGGER)\n"
     "\n"

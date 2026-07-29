@@ -123,9 +123,17 @@ only Escape from Relay offers the exit confirmation.
 
 ## Module source
 
-The public interface and architecture are declared before `on_process`:
+Every newly created Blueprint begins with a compact quick-reference comment.
+The public interface and architecture follow it and are declared before
+`on_process`:
 
 ```lua
+-- Relay Blueprint
+-- Ports: input/output with Type.*.
+-- Components: source.*, control.*, or script.*.
+-- on_process gets read-only inputs; state persists per instance.
+-- Return declared outputs. Save with :w.
+
 input("trigger", Type.TRIGGER)
 input("enabled", Type.BOOLEAN)
 output("trigger_out", Type.TRIGGER)

@@ -99,6 +99,10 @@ namespace separators transactionally. The Blueprint compiler blanks these
 declarative lines from the Lua runtime chunk while preserving diagnostic line
 numbers; the architecture parser owns them. `on_process(inputs, state)` is the
 deterministic activation observer.
+New Blueprint source starts with a compact Lua quick-reference covering typed
+ports, definition namespaces, activation behavior, persistent state, returned
+outputs, and `:w`. Graph synchronization preserves this user-visible header as
+ordinary source and only regenerates architecture declarations.
 Successful graph component creation, connection replacement, and movement
 regenerate these declarations and recompile the artifact and plan
 transactionally. Regeneration canonicalizes the architecture boundary to one

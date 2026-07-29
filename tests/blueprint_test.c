@@ -24,6 +24,12 @@ static Relay_Node *relay_test_visible_node(Relay_NodeWorld *world,
 static bool relay_test_compact_architecture_source(void)
 {
     static const char expected_created[] =
+        "-- Relay Blueprint\n"
+        "-- Ports: input/output with Type.*.\n"
+        "-- Components: source.*, control.*, or script.*.\n"
+        "-- on_process gets read-only inputs; state persists per instance.\n"
+        "-- Return declared outputs. Save with :w.\n"
+        "\n"
         "input(\"trigger\", Type.TRIGGER)\n"
         "output(\"trigger_out\", Type.TRIGGER)\n"
         "\n"
@@ -34,6 +40,12 @@ static bool relay_test_compact_architecture_source(void)
         "  return { trigger_out = inputs.trigger or 0 }\n"
         "end\n";
     static const char expected_moved[] =
+        "-- Relay Blueprint\n"
+        "-- Ports: input/output with Type.*.\n"
+        "-- Components: source.*, control.*, or script.*.\n"
+        "-- on_process gets read-only inputs; state persists per instance.\n"
+        "-- Return declared outputs. Save with :w.\n"
+        "\n"
         "input(\"trigger\", Type.TRIGGER)\n"
         "output(\"trigger_out\", Type.TRIGGER)\n"
         "\n"
