@@ -58,6 +58,35 @@ static Relay_GameInput relay_app_game_input(const Relay_TerminalEvent *event)
     return RELAY_GAME_INPUT_NONE;
 }
 
+/** Consume directional input as camera navigation while the map is active. */
+static bool relay_app_handle_map_navigation(Relay_App *app,
+    const Relay_TerminalEvent *event)
+{
+    int direction_x = 0;
+    int direction_y = 0;
+
+    if (app->game.workspace_mode != RELAY_GAME_WORKSPACE_MAP) {
+        return false;
+    }
+    if (event->key == RELAY_TERMINAL_KEY_LEFT ||
+        event->character == 'h') {
+        direction_x = -1;
+    } else if (event->key == RELAY_TERMINAL_KEY_RIGHT ||
+        event->character == 'l') {
+        direction_x = 1;
+    } else if (event->key == RELAY_TERMINAL_KEY_UP ||
+        event->character == 'k') {
+        direction_y = -1;
+    } else if (event->key == RELAY_TERMINAL_KEY_DOWN ||
+        event->character == 'j') {
+        direction_y = 1;
+    } else {
+        return false;
+    }
+    relay_terminal_pan_map(&app->terminal, direction_x, direction_y);
+    return true;
+}
+
 /** Apply Escape as a universal back action before offering application exit. */
 static void relay_app_back(Relay_App *app)
 {
@@ -582,6 +611,8 @@ int relay_app_run(Relay_App *app)
                 }
             } else if (event.key == RELAY_TERMINAL_KEY_ESCAPE) {
                 relay_app_back(app);
+            } else if (relay_app_handle_map_navigation(app, &event)) {
+                result = RELAY_GAME_ACTION_NONE;
             } else if (event.key == RELAY_TERMINAL_KEY_SAVE ||
                 event.character == 's' || event.character == 'S') {
                 app->exit_after_save = false;

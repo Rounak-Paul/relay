@@ -84,9 +84,12 @@ Ore, and Stone. Types are enforced by the graph, so resource kinds cannot be
 interchanged or fed into a Trigger input.
 
 Every purchased node becomes the viewport focus. Press `m` to toggle the Relay
-map view, which zooms out to compact node names; drag its empty space to pan at
-the map scale. Escape is always Back: it first returns from map view, then
-opens a centered exit confirmation from the graph view. Press Enter there to
+map view, which zooms out to compact node names. The cyan `◎` in the middle is
+the graph camera: drag the map, use the arrow keys, or use `h`/`j`/`k`/`l` to
+choose the scene position that should be centered when you return. Colored
+arrows along the map edges point toward nodes beyond the visible overview.
+Escape is always Back: it returns to the graph at the selected map position,
+then opens a centered exit confirmation from graph view. Press Enter there to
 save and exit, or Escape to cancel. `q` never exits the game.
 
 ## Script Blueprints

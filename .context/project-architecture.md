@@ -242,6 +242,15 @@ changes only the captured node's signed 64-bit world position. Only a card's
 title row may capture a node drag; ports and all other card rows remain free
 for graph interactions.
 
+Graph cards use rectangle intersection for visibility and clip every rendered
+cell to the scene rectangle: horizontal clipping stops at the inspector divider
+and vertical clipping preserves the workspace-tab rows. A card remains rendered
+and hit-testable while any portion intersects the scene, and disappears only
+after its complete rectangle leaves the viewport. Compact map labels and graph
+wires follow the same clipping boundary. Hit testing rejects panel and
+out-of-terminal coordinates before evaluating a partially visible title or
+port row.
+
 Graph connections render as clipped orthogonal terminal wires behind node cards,
 with rounded turns and short horizontal stubs outside edge-mounted port anchors.
 A live preview follows the pointer while either port direction is being wired.
@@ -269,6 +278,14 @@ clicked. The Inspector reads the immutable
 definition and script-visible node properties; a focused Timer presents its
 interval configuration and valid duration set without a parallel UI-only
 configuration model. `m` toggles the compact map renderer;
+the map projects the same world-space camera used by the graph around a fixed
+cyan center marker. Mouse dragging and arrow/Vim navigation move that shared
+camera in map-scale increments, so Escape returns to graph view at exactly the
+chosen scene position without a second map-only camera or coordinate
+conversion. The overview dot grid is projected through the same map transform,
+so it moves with the world while the camera marker remains fixed. Visible nodes
+use compact labels; off-screen nodes project onto the nearest scene edge as
+node-colored cardinal or diagonal direction markers.
 Escape is a universal Back request, returning map view to graph view before the
 application opens its centered exit-confirmation overlay. Only Enter confirms
 that overlay; `q` is never an exit shortcut.

@@ -16,7 +16,8 @@ enum {
     RELAY_TERMINAL_MIN_HEIGHT = 10,
     RELAY_TERMINAL_START_WIDTH = 46,
     RELAY_TERMINAL_START_HEIGHT = 18,
-    RELAY_TERMINAL_START_MENU_ROW = 10
+    RELAY_TERMINAL_START_MENU_ROW = 10,
+    RELAY_TERMINAL_MAP_SCALE = 4
 };
 
 /** One graph-port hit result used to start or finish mouse wiring. */
@@ -52,6 +53,19 @@ typedef struct Relay_TerminalEditorView {
     size_t cursor_line;
     size_t cursor_column;
 } Relay_TerminalEditorView;
+
+/** One world point projected into the zoomed-out map viewport. */
+typedef struct Relay_TerminalMapPoint {
+    int64_t x;
+    int64_t y;
+} Relay_TerminalMapPoint;
+
+/** One directional indicator for a node outside the map viewport. */
+typedef struct Relay_TerminalMapMarker {
+    int x;
+    int y;
+    uint32_t glyph;
+} Relay_TerminalMapMarker;
 
 /** Resolve the centered title-screen origin for drawing and hit testing. */
 static bool relay_terminal_start_layout(int width, int height, int *x, int *y)
@@ -322,10 +336,119 @@ static int64_t relay_terminal_add_delta(int64_t coordinate, int64_t delta)
     return coordinate + delta;
 }
 
+/** Divide a signed coordinate downward so negative map positions stay stable. */
+static int64_t relay_terminal_floor_divide(int64_t value, int divisor)
+{
+    const int64_t quotient = value / divisor;
+    const int64_t remainder = value % divisor;
+
+    return remainder < 0 ? quotient - 1 : quotient;
+}
+
+/** Return the fixed terminal-space center of the playable scene rectangle. */
+static Relay_TerminalPoint relay_terminal_scene_center(int divider_x,
+    int height)
+{
+    return (Relay_TerminalPoint){
+        divider_x / 2,
+        (2 + height - 1) / 2
+    };
+}
+
+/** Project one world-grid point around the shared scene camera in map mode. */
+static Relay_TerminalMapPoint relay_terminal_map_project(int64_t world_x,
+    int64_t world_y, const Relay_Terminal *terminal, int divider_x, int height)
+{
+    const Relay_TerminalPoint center =
+        relay_terminal_scene_center(divider_x, height);
+    int64_t relative_x = relay_terminal_add_delta(world_x,
+        terminal->grid_offset_x);
+    int64_t relative_y = relay_terminal_add_delta(world_y,
+        terminal->grid_offset_y);
+
+    relative_x = relay_terminal_add_delta(relative_x, -(center.x - 2));
+    relative_y = relay_terminal_add_delta(relative_y, -(center.y - 3));
+    return (Relay_TerminalMapPoint){
+        relay_terminal_add_delta(center.x,
+            relay_terminal_floor_divide(relative_x,
+                RELAY_TERMINAL_MAP_SCALE)),
+        relay_terminal_add_delta(center.y,
+            relay_terminal_floor_divide(relative_y,
+                RELAY_TERMINAL_MAP_SCALE))
+    };
+}
+
+/** Return whether a projected map anchor belongs to the scene rectangle. */
+static bool relay_terminal_map_point_visible(Relay_TerminalMapPoint point,
+    int divider_x, int height)
+{
+    return point.x >= 0 && point.x < divider_x &&
+        point.y >= 2 && point.y < height;
+}
+
+/** Resolve one off-screen map point to a directional scene-edge marker. */
+static bool relay_terminal_map_marker(Relay_TerminalMapPoint point,
+    int divider_x, int height, Relay_TerminalMapMarker *marker)
+{
+    const Relay_TerminalPoint center =
+        relay_terminal_scene_center(divider_x, height);
+    const long double delta_x = (long double)point.x - center.x;
+    const long double delta_y = (long double)point.y - center.y;
+    const long double absolute_x = delta_x < 0 ? -delta_x : delta_x;
+    const long double absolute_y = delta_y < 0 ? -delta_y : delta_y;
+    const long double limit_x = delta_x < 0 ? center.x :
+        divider_x - 1 - center.x;
+    const long double limit_y = delta_y < 0 ? center.y - 2 :
+        height - 1 - center.y;
+    long double scale_x = delta_x == 0 ? 2.0L : limit_x / absolute_x;
+    long double scale_y = delta_y == 0 ? 2.0L : limit_y / absolute_y;
+    const long double scale = scale_x < scale_y ? scale_x : scale_y;
+    int x;
+    int y;
+
+    if (marker == NULL ||
+        relay_terminal_map_point_visible(point, divider_x, height) ||
+        (delta_x == 0 && delta_y == 0)) {
+        return false;
+    }
+    x = center.x + (int)(delta_x * scale);
+    y = center.y + (int)(delta_y * scale);
+    if (x < 0) {
+        x = 0;
+    } else if (x >= divider_x) {
+        x = divider_x - 1;
+    }
+    if (y < 2) {
+        y = 2;
+    } else if (y >= height) {
+        y = height - 1;
+    }
+    marker->x = x;
+    marker->y = y;
+    if (absolute_x > absolute_y * 2.0L) {
+        marker->glyph = delta_x < 0 ? 0x25c0U : 0x25b6U;
+    } else if (absolute_y > absolute_x * 2.0L) {
+        marker->glyph = delta_y < 0 ? 0x25b2U : 0x25bcU;
+    } else if (delta_x < 0) {
+        marker->glyph = delta_y < 0 ? 0x2196U : 0x2199U;
+    } else {
+        marker->glyph = delta_y < 0 ? 0x2197U : 0x2198U;
+    }
+    return true;
+}
+
 /** Return whether a node belongs on the current collapsed graph surface. */
 static bool relay_terminal_node_is_visible(const Relay_Node *node)
 {
     return node != NULL && node->module_instance_id == 0;
+}
+
+/** Return whether any part of a graph card intersects the scene viewport. */
+static bool relay_terminal_card_intersects(int x, int y, int width, int height,
+    int divider_x, int terminal_height)
+{
+    return width > 0 && height > 0 && x < divider_x &&
+        x > -width && y < terminal_height && y > 2 - height;
 }
 
 /** Resolve one graph connection into an orthogonal terminal-space wire route. */
@@ -429,6 +552,21 @@ static bool relay_terminal_input_anchor(const Relay_Game *game,
     *y = 3 + (int)node->grid_y + (int)terminal->grid_offset_y + 3 +
         (int)port_index;
     return true;
+}
+
+void relay_terminal_pan_map(Relay_Terminal *terminal, int direction_x,
+    int direction_y)
+{
+    if (terminal == NULL || direction_x < -1 || direction_x > 1 ||
+        direction_y < -1 || direction_y > 1) {
+        return;
+    }
+    terminal->grid_offset_x = relay_terminal_add_delta(
+        terminal->grid_offset_x,
+        -(int64_t)direction_x * RELAY_TERMINAL_MAP_SCALE);
+    terminal->grid_offset_y = relay_terminal_add_delta(
+        terminal->grid_offset_y,
+        -(int64_t)direction_y * RELAY_TERMINAL_MAP_SCALE);
 }
 
 /** Calculate the divider position for Relay's playfield and side panel. */
@@ -538,6 +676,65 @@ static bool relay_terminal_write_at(HANDLE output, int x, int y,
         relay_terminal_write(output, sequence);
 }
 
+/** Return the byte width of one trusted UTF-8 sequence. */
+static size_t relay_terminal_utf8_sequence_size(unsigned char lead)
+{
+    if ((lead & 0x80U) == 0) {
+        return 1;
+    }
+    if ((lead & 0xe0U) == 0xc0U) {
+        return 2;
+    }
+    if ((lead & 0xf0U) == 0xe0U) {
+        return 3;
+    }
+    if ((lead & 0xf8U) == 0xf0U) {
+        return 4;
+    }
+    return 1;
+}
+
+/** Draw one single-cell UTF-8 row clipped to the Windows scene rectangle. */
+static bool relay_terminal_draw_scene_text(HANDLE output, int x, int y,
+    int divider_x, int height, const char *text)
+{
+    char clipped[256];
+    size_t source = 0;
+    size_t target = 0;
+    int column = x;
+
+    if (text == NULL || y < 2 || y >= height || x >= divider_x) {
+        return true;
+    }
+    while (text[source] != '\0' && column < divider_x) {
+        size_t sequence_size = relay_terminal_utf8_sequence_size(
+            (unsigned char)text[source]);
+        size_t available = 0;
+
+        while (available < sequence_size &&
+            text[source + available] != '\0') {
+            available++;
+        }
+        if (available != sequence_size) {
+            sequence_size = 1;
+        }
+        if (column >= 0) {
+            if (target > sizeof(clipped) - 1 - sequence_size) {
+                return false;
+            }
+            (void)memcpy(&clipped[target], &text[source], sequence_size);
+            target += sequence_size;
+        }
+        source += sequence_size;
+        column++;
+    }
+    if (target == 0) {
+        return true;
+    }
+    clipped[target] = '\0';
+    return relay_terminal_write_at(output, x < 0 ? 0 : x, y, clipped);
+}
+
 /** Draw Relay and every open Blueprint as persistent Windows workspace tabs. */
 static bool relay_terminal_draw_workspace_tabs(HANDLE output, int divider_x,
     const Relay_Game *game)
@@ -591,14 +788,20 @@ static const char *relay_terminal_port_glyph(Relay_NodePortType type)
 
 /** Draw the pan-aware dot grid behind Relay's graph workspace. */
 static bool relay_terminal_draw_grid(HANDLE output, int divider_x, int height,
-    const Relay_Terminal *terminal)
+    const Relay_Terminal *terminal, Relay_GameWorkspaceMode workspace_mode)
 {
+    const Relay_TerminalMapPoint map_origin = relay_terminal_map_project(
+        0, 0, terminal, divider_x, height);
+    const int64_t origin_x = workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+        map_origin.x : terminal->grid_offset_x;
+    const int64_t origin_y = workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+        map_origin.y : terminal->grid_offset_y;
     int x;
     int y;
 
     for (y = 2 + relay_terminal_positive_modulo(
-        terminal->grid_offset_y - 2, 2); y < height; y += 2) {
-        for (x = relay_terminal_positive_modulo(terminal->grid_offset_x, 4);
+        origin_y - 2, 2); y < height; y += 2) {
+        for (x = relay_terminal_positive_modulo(origin_x, 4);
             x < divider_x; x += 4) {
             if (!relay_terminal_write_at(output, x, y, "\x1b[2m.\x1b[0m")) {
                 return false;
@@ -626,6 +829,21 @@ static const char *relay_terminal_wire_glyph(uint32_t glyph)
     case 0x256EU: return "╮";
     case 0x256FU: return "╯";
     default: return "╰";
+    }
+}
+
+/** Return an UTF-8 glyph string for one shared map direction code point. */
+static const char *relay_terminal_map_glyph(uint32_t glyph)
+{
+    switch (glyph) {
+    case 0x25c0U: return "◀";
+    case 0x25b6U: return "▶";
+    case 0x25b2U: return "▲";
+    case 0x25bcU: return "▼";
+    case 0x2196U: return "↖";
+    case 0x2197U: return "↗";
+    case 0x2198U: return "↘";
+    default: return "↙";
     }
 }
 
@@ -752,15 +970,19 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
     char output_content[20];
     size_t row;
 
-    if (card.definition == NULL || x < 0 || y < 2 ||
-        x + card.width - 1 >= divider_x || y + card.height - 1 >= height) {
+    if (card.definition == NULL ||
+        !relay_terminal_card_intersects(x, y, card.width, card.height,
+            divider_x, height)) {
         return true;
     }
     (void)snprintf(line, sizeof(line), "│ ◆ %-20.20s │",
         card.definition->display_name);
-    if (!relay_terminal_write_at(output, x, y, "╭────────────────────────╮") ||
-        !relay_terminal_write_at(output, x, y + 1, line) ||
-        !relay_terminal_write_at(output, x, y + 2, "├────────────────────────┤")) {
+    if (!relay_terminal_draw_scene_text(output, x, y, divider_x, height,
+            "╭────────────────────────╮") ||
+        !relay_terminal_draw_scene_text(output, x, y + 1, divider_x, height,
+            line) ||
+        !relay_terminal_draw_scene_text(output, x, y + 2, divider_x, height,
+            "├────────────────────────┤")) {
         return false;
     }
     for (row = 0; row < (size_t)card.height - 5; row++) {
@@ -788,14 +1010,22 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
         (void)snprintf(line, sizeof(line), "%s %-22.22s %s",
             input == NULL ? "│" : "●", content,
             output == NULL ? "│" : "●");
-        if (!relay_terminal_write_at(output, x, y + 3 + (int)row, line)) {
+        if (!relay_terminal_draw_scene_text(output, x, y + 3 + (int)row,
+                divider_x, height, line)) {
             return false;
         }
-        if ((input != NULL && !relay_terminal_write_at(output, x,
-                y + 3 + (int)row, relay_terminal_port_glyph(input->type))) ||
-            (output != NULL && !relay_terminal_write_at(output,
-                x + card.width - 1, y + 3 + (int)row,
-                relay_terminal_port_glyph(output->type)))) {
+        if ((input != NULL && x >= 0 && x < divider_x &&
+                y + 3 + (int)row >= 2 &&
+                y + 3 + (int)row < height &&
+                !relay_terminal_write_at(output, x, y + 3 + (int)row,
+                    relay_terminal_port_glyph(input->type))) ||
+            (output != NULL && x + card.width - 1 >= 0 &&
+                x + card.width - 1 < divider_x &&
+                y + 3 + (int)row >= 2 &&
+                y + 3 + (int)row < height &&
+                !relay_terminal_write_at(output, x + card.width - 1,
+                    y + 3 + (int)row,
+                    relay_terminal_port_glyph(output->type)))) {
             return false;
         }
     }
@@ -829,10 +1059,12 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
         (void)snprintf(content, sizeof(content), "enabled");
     }
     (void)snprintf(line, sizeof(line), "│ %-22.22s │", content);
-    if (!relay_terminal_write_at(output, x, y + card.height - 2, line)) {
+    if (!relay_terminal_draw_scene_text(output, x, y + card.height - 2,
+            divider_x, height, line)) {
         return false;
     }
-    return relay_terminal_write_at(output, x, y + card.height - 1,
+    return relay_terminal_draw_scene_text(output, x,
+        y + card.height - 1, divider_x, height,
         "╰────────────────────────╯");
 }
 
@@ -841,18 +1073,51 @@ static bool relay_terminal_draw_node_map(HANDLE output, const Relay_Node *node,
     const Relay_Terminal *terminal, int divider_x, int height)
 {
     const Relay_NodeRenderCard card = relay_node_renderer_card(node);
-    const int64_t world_x = node->grid_x + terminal->grid_offset_x;
-    const int64_t world_y = node->grid_y + terminal->grid_offset_y;
-    const int x = (int)(2 + world_x / 4);
-    const int y = (int)(3 + world_y / 4);
+    const Relay_TerminalMapPoint point = relay_terminal_map_project(
+        node->grid_x, node->grid_y, terminal, divider_x, height);
     char line[64];
 
-    if (card.definition == NULL || x < 0 || y < 2 || x >= divider_x ||
-        y >= height) {
+    if (card.definition == NULL ||
+        !relay_terminal_map_point_visible(point, divider_x, height)) {
         return true;
     }
     (void)snprintf(line, sizeof(line), "◆ %s", card.definition->display_name);
-    return relay_terminal_write_at(output, x, y, line);
+    return relay_terminal_draw_scene_text(output, (int)point.x, (int)point.y,
+        divider_x, height, line);
+}
+
+/** Draw off-screen node directions and the fixed map camera marker. */
+static bool relay_terminal_draw_map_navigation(HANDLE output,
+    const Relay_Game *game, const Relay_Terminal *terminal, int divider_x,
+    int height)
+{
+    const Relay_TerminalPoint center =
+        relay_terminal_scene_center(divider_x, height);
+    size_t index;
+
+    for (index = 0;
+        index < relay_game_active_world_const(game)->count; index++) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index];
+        const Relay_NodeRenderCard card = relay_node_renderer_card(node);
+        const Relay_TerminalMapPoint point = relay_terminal_map_project(
+            node->grid_x, node->grid_y, terminal, divider_x, height);
+        Relay_TerminalMapMarker marker;
+        char text[24];
+
+        if (!relay_terminal_node_is_visible(node) ||
+            card.definition == NULL ||
+            !relay_terminal_map_marker(point, divider_x, height, &marker)) {
+            continue;
+        }
+        (void)snprintf(text, sizeof(text), "\x1b[1;33m%s\x1b[0m",
+            relay_terminal_map_glyph(marker.glyph));
+        if (!relay_terminal_write_at(output, marker.x, marker.y, text)) {
+            return false;
+        }
+    }
+    return relay_terminal_write_at(output, center.x, center.y,
+        "\x1b[1;36m◎\x1b[0m");
 }
 
 /** Draw the active blueprint source editor in the Windows console backend. */
@@ -1037,7 +1302,8 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
                 editing)) {
             return false;
         }
-    } else if (!relay_terminal_draw_grid(output, divider_x, height, terminal)) {
+    } else if (!relay_terminal_draw_grid(output, divider_x, height, terminal,
+            game->workspace_mode)) {
         return false;
     }
     if (editing == NULL && game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH &&
@@ -1284,6 +1550,12 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
             return false;
         }
     }
+    if (editing == NULL &&
+        game->workspace_mode == RELAY_GAME_WORKSPACE_MAP &&
+        !relay_terminal_draw_map_navigation(output, game, terminal, divider_x,
+            height)) {
+        return false;
+    }
     (void)snprintf(line, sizeof(line), "session: %.40s",
         game->session_status);
     return relay_terminal_write_at(output, divider_x + 2, height - 4, line) &&
@@ -1295,6 +1567,8 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
             editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
                 ":w deploy  :wq deploy/back" :
         editing != NULL ? "NORMAL  i/a/o insert  : command" :
+        game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+            "MAP  ◎ camera center" :
             "N:new ,/.:tab C:close E:edit S:save") &&
         relay_terminal_write_at(output, divider_x + 2, height - 2,
             editing != NULL &&
@@ -1304,6 +1578,8 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
                 editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
                     "Enter: run  Esc: cancel" :
             editing != NULL ? "hjkl move  x delete  Esc back" :
+            game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+                "drag/arrows/hjkl pan  Esc:return" :
             game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
                 "j/k: select  Enter: buy" :
             game->active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS ?
@@ -1638,7 +1914,6 @@ void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
     int divider_x;
     int width;
     int height;
-    int scale;
 
     if (terminal == NULL || game == NULL ||
         !GetConsoleScreenBufferInfo(terminal->output, &information)) {
@@ -1655,11 +1930,10 @@ void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
         return;
     }
     card = relay_node_renderer_card(node);
-    scale = game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ? 4 : 1;
-    terminal->grid_offset_x = (int64_t)(divider_x / 2 - 2) * scale -
-        node->grid_x - (int64_t)(card.width / 2) * scale;
-    terminal->grid_offset_y = (int64_t)(height / 2 - 3) * scale -
-        node->grid_y - (int64_t)(card.height / 2) * scale;
+    terminal->grid_offset_x = (int64_t)(divider_x / 2 - 2) -
+        node->grid_x - card.width / 2;
+    terminal->grid_offset_y = (int64_t)(height / 2 - 3) -
+        node->grid_y - card.height / 2;
 }
 
 /** Return the topmost graph node card at a terminal mouse coordinate. */
@@ -1715,7 +1989,9 @@ static Relay_TerminalPortHit relay_terminal_port_at(const Relay_Game *game,
     }
     width = information.srWindow.Right - information.srWindow.Left + 1;
     height = information.srWindow.Bottom - information.srWindow.Top + 1;
-    if (!relay_terminal_split(width, height, &divider_x)) {
+    if (!relay_terminal_split(width, height, &divider_x) ||
+        mouse_x < 0 || mouse_x >= divider_x ||
+        mouse_y < 2 || mouse_y >= height) {
         return (Relay_TerminalPortHit){0};
     }
     for (index = relay_game_active_world_const(game)->count; index > 0;
@@ -1881,7 +2157,8 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
                 event->grid_delta_y = delta_y;
             } else if (terminal->dragging_grid) {
                 const int scale = game->workspace_mode ==
-                    RELAY_GAME_WORKSPACE_MAP ? 4 : 1;
+                    RELAY_GAME_WORKSPACE_MAP ?
+                        RELAY_TERMINAL_MAP_SCALE : 1;
 
                 terminal->grid_offset_x = relay_terminal_add_delta(
                     terminal->grid_offset_x, (int64_t)delta_x * scale);
@@ -1948,6 +2225,30 @@ static void relay_terminal_draw_text(int x, int y, uintattr_t foreground,
     (void)tb_print(x, y, foreground, TB_DEFAULT, text);
 }
 
+/** Draw one single-cell UTF-8 row clipped to the Termbox scene rectangle. */
+static void relay_terminal_draw_scene_text(int x, int y, int divider_x,
+    int height, uintattr_t foreground, const char *text)
+{
+    int column = x;
+
+    if (text == NULL || y < 2 || y >= height || x >= divider_x) {
+        return;
+    }
+    while (*text != '\0' && column < divider_x) {
+        uint32_t glyph;
+        const int sequence_size = tb_utf8_char_to_unicode(&glyph, text);
+
+        if (sequence_size <= 0) {
+            return;
+        }
+        if (column >= 0) {
+            (void)tb_set_cell(column, y, glyph, foreground, TB_DEFAULT);
+        }
+        text += sequence_size;
+        column++;
+    }
+}
+
 /** Convert a node-renderer color token into a Termbox foreground attribute. */
 static uintattr_t relay_terminal_node_color(unsigned int color)
 {
@@ -1983,17 +2284,23 @@ static uintattr_t relay_terminal_port_color(Relay_NodePortType type)
 
 /** Draw the pan-aware dot grid behind Relay's graph workspace. */
 static void relay_terminal_draw_grid(int divider_x, int height,
-    const Relay_Terminal *terminal)
+    const Relay_Terminal *terminal, Relay_GameWorkspaceMode workspace_mode)
 {
+    const Relay_TerminalMapPoint map_origin = relay_terminal_map_project(
+        0, 0, terminal, divider_x, height);
+    const int64_t origin_x = workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+        map_origin.x : terminal->grid_offset_x;
+    const int64_t origin_y = workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+        map_origin.y : terminal->grid_offset_y;
     int x;
     int y;
 
     for (y = 2; y < height; y++) {
-        if (relay_terminal_positive_modulo(y - terminal->grid_offset_y, 2) != 0) {
+        if (relay_terminal_positive_modulo(y - origin_y, 2) != 0) {
             continue;
         }
         for (x = 0; x < divider_x; x++) {
-            if (relay_terminal_positive_modulo(x - terminal->grid_offset_x, 4) == 0) {
+            if (relay_terminal_positive_modulo(x - origin_x, 4) == 0) {
                 (void)tb_set_cell(x, y, '.', TB_WHITE | TB_DIM, TB_DEFAULT);
             }
         }
@@ -2247,21 +2554,27 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
     const Relay_NodeRenderCard card = relay_node_renderer_card(node);
     const int x = 2 + node->grid_x + terminal->grid_offset_x;
     const int y = 3 + node->grid_y + terminal->grid_offset_y;
+    char line[64];
     char content[32];
     char input_content[20];
     char output_content[20];
     size_t row;
 
-    if (card.definition == NULL || x < 0 || y < 2 ||
-        x + card.width - 1 >= divider_x || y + card.height - 1 >= height) {
+    if (card.definition == NULL ||
+        !relay_terminal_card_intersects(x, y, card.width, card.height,
+            divider_x, height)) {
         return;
     }
-    (void)tb_print(x, y, relay_terminal_node_color(card.visual.color),
-        TB_DEFAULT, "╭────────────────────────╮");
-    (void)tb_printf(x, y + 1, relay_terminal_node_color(card.visual.color),
-        TB_DEFAULT, "│ ◆ %-20.20s │", card.definition->display_name);
-    (void)tb_print(x, y + 2, relay_terminal_node_color(card.visual.color),
-        TB_DEFAULT, "├────────────────────────┤");
+    relay_terminal_draw_scene_text(x, y, divider_x, height,
+        relay_terminal_node_color(card.visual.color),
+        "╭────────────────────────╮");
+    (void)snprintf(line, sizeof(line), "│ ◆ %-20.20s │",
+        card.definition->display_name);
+    relay_terminal_draw_scene_text(x, y + 1, divider_x, height,
+        relay_terminal_node_color(card.visual.color), line);
+    relay_terminal_draw_scene_text(x, y + 2, divider_x, height,
+        relay_terminal_node_color(card.visual.color),
+        "├────────────────────────┤");
     for (row = 0; row < (size_t)card.height - 5; row++) {
         const Relay_NodePortDefinition *input = row < card.definition->input_count ?
             &card.definition->inputs[row] : NULL;
@@ -2284,17 +2597,22 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
         }
         (void)snprintf(content, sizeof(content), "%-10.10s%12.12s",
             input_content, output_content);
-        (void)tb_printf(x, y + 3 + (int)row,
-            relay_terminal_node_color(card.visual.color), TB_DEFAULT,
+        (void)snprintf(line, sizeof(line),
             "%s %-22.22s %s", input == NULL ? "│" : "●", content,
             output == NULL ? "│" : "●");
-        if (input != NULL) {
-            (void)tb_print(x, y + 3 + (int)row,
-                relay_terminal_port_color(input->type), TB_DEFAULT, "●");
+        relay_terminal_draw_scene_text(x, y + 3 + (int)row, divider_x,
+            height, relay_terminal_node_color(card.visual.color),
+            line);
+        if (input != NULL && x >= 0 && x < divider_x &&
+            y + 3 + (int)row >= 2 && y + 3 + (int)row < height) {
+            (void)tb_set_cell(x, y + 3 + (int)row, 0x25cfU,
+                relay_terminal_port_color(input->type), TB_DEFAULT);
         }
-        if (output != NULL) {
-            (void)tb_print(x + card.width - 1, y + 3 + (int)row,
-                relay_terminal_port_color(output->type), TB_DEFAULT, "●");
+        if (output != NULL && x + card.width - 1 >= 0 &&
+            x + card.width - 1 < divider_x &&
+            y + 3 + (int)row >= 2 && y + 3 + (int)row < height) {
+            (void)tb_set_cell(x + card.width - 1, y + 3 + (int)row,
+                0x25cfU, relay_terminal_port_color(output->type), TB_DEFAULT);
         }
     }
     if (card.definition->simulation.behavior ==
@@ -2326,11 +2644,12 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
     } else {
         (void)snprintf(content, sizeof(content), "enabled");
     }
-    (void)tb_printf(x, y + card.height - 2,
-        relay_terminal_node_color(card.visual.color), TB_DEFAULT,
-        "│ %-22.22s │", content);
-    (void)tb_print(x, y + card.height - 1,
-        relay_terminal_node_color(card.visual.color), TB_DEFAULT,
+    (void)snprintf(line, sizeof(line), "│ %-22.22s │",
+        content);
+    relay_terminal_draw_scene_text(x, y + card.height - 2, divider_x,
+        height, relay_terminal_node_color(card.visual.color), line);
+    relay_terminal_draw_scene_text(x, y + card.height - 1, divider_x,
+        height, relay_terminal_node_color(card.visual.color),
         "╰────────────────────────╯");
 }
 
@@ -2339,17 +2658,47 @@ static void relay_terminal_draw_node_map(const Relay_Node *node,
     const Relay_Terminal *terminal, int divider_x, int height)
 {
     const Relay_NodeRenderCard card = relay_node_renderer_card(node);
-    const int64_t world_x = node->grid_x + terminal->grid_offset_x;
-    const int64_t world_y = node->grid_y + terminal->grid_offset_y;
-    const int x = (int)(2 + world_x / 4);
-    const int y = (int)(3 + world_y / 4);
+    const Relay_TerminalMapPoint point = relay_terminal_map_project(
+        node->grid_x, node->grid_y, terminal, divider_x, height);
+    char line[64];
 
-    if (card.definition == NULL || x < 0 || y < 2 || x >= divider_x ||
-        y >= height) {
+    if (card.definition == NULL ||
+        !relay_terminal_map_point_visible(point, divider_x, height)) {
         return;
     }
-    (void)tb_printf(x, y, relay_terminal_node_color(card.visual.color),
-        TB_DEFAULT, "◆ %s", card.definition->display_name);
+    (void)snprintf(line, sizeof(line), "◆ %s",
+        card.definition->display_name);
+    relay_terminal_draw_scene_text((int)point.x, (int)point.y, divider_x,
+        height, relay_terminal_node_color(card.visual.color), line);
+}
+
+/** Draw off-screen node directions and the fixed map camera marker. */
+static void relay_terminal_draw_map_navigation(const Relay_Game *game,
+    const Relay_Terminal *terminal, int divider_x, int height)
+{
+    const Relay_TerminalPoint center =
+        relay_terminal_scene_center(divider_x, height);
+    size_t index;
+
+    for (index = 0;
+        index < relay_game_active_world_const(game)->count; index++) {
+        const Relay_Node *node =
+            &relay_game_active_world_const(game)->nodes[index];
+        const Relay_NodeRenderCard card = relay_node_renderer_card(node);
+        const Relay_TerminalMapPoint point = relay_terminal_map_project(
+            node->grid_x, node->grid_y, terminal, divider_x, height);
+        Relay_TerminalMapMarker marker;
+
+        if (!relay_terminal_node_is_visible(node) ||
+            card.definition == NULL ||
+            !relay_terminal_map_marker(point, divider_x, height, &marker)) {
+            continue;
+        }
+        (void)tb_set_cell(marker.x, marker.y, marker.glyph,
+            relay_terminal_node_color(card.visual.color), TB_DEFAULT);
+    }
+    (void)tb_set_cell(center.x, center.y, 0x25ceU,
+        TB_CYAN | TB_BOLD, TB_DEFAULT);
 }
 
 /** Draw the active blueprint source editor in the Termbox backend. */
@@ -2524,7 +2873,8 @@ static void relay_terminal_draw_split(int width, int height,
     if (editing != NULL) {
         relay_terminal_draw_editor(divider_x, height, game, editing);
     } else {
-        relay_terminal_draw_grid(divider_x, height, terminal);
+        relay_terminal_draw_grid(divider_x, height, terminal,
+            game->workspace_mode);
     }
     if (editing == NULL &&
         game->workspace_mode == RELAY_GAME_WORKSPACE_GRAPH) {
@@ -2719,6 +3069,10 @@ static void relay_terminal_draw_split(int width, int height,
             relay_terminal_draw_node_graph(node, terminal, divider_x, height);
         }
     }
+    if (editing == NULL &&
+        game->workspace_mode == RELAY_GAME_WORKSPACE_MAP) {
+        relay_terminal_draw_map_navigation(game, terminal, divider_x, height);
+    }
     (void)tb_printf(divider_x + 2, height - 4, TB_GREEN, TB_DEFAULT,
         "session: %.40s", game->session_status);
     relay_terminal_draw_text(divider_x + 2, height - 3, TB_YELLOW,
@@ -2729,6 +3083,8 @@ static void relay_terminal_draw_split(int width, int height,
             editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
                 ":w deploy  :wq deploy/back" :
         editing != NULL ? "NORMAL  i/a/o insert  : command" :
+        game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+            "MAP  ◎ camera center" :
             "N:new ,/.:tab C:close E:edit S:save");
     relay_terminal_draw_text(divider_x + 2, height - 2, TB_YELLOW,
         editing != NULL &&
@@ -2738,6 +3094,8 @@ static void relay_terminal_draw_split(int width, int height,
             editing->editor_mode == RELAY_BLUEPRINT_EDITOR_COMMAND ?
                 "Enter: run  Esc: cancel" :
         editing != NULL ? "hjkl move  x delete  Esc back" :
+        game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ?
+            "drag/arrows/hjkl pan  Esc:return" :
         game->active_tab == RELAY_GAME_PANEL_TAB_SHOP ?
             "j/k: select  Enter: buy" :
         game->active_tab == RELAY_GAME_PANEL_TAB_BLUEPRINTS ?
@@ -3050,7 +3408,6 @@ void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
     const Relay_Node *node;
     Relay_NodeRenderCard card;
     int divider_x;
-    int scale;
 
     if (terminal == NULL || game == NULL ||
         !relay_terminal_split(tb_width(), tb_height(), &divider_x)) {
@@ -3062,11 +3419,10 @@ void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
         return;
     }
     card = relay_node_renderer_card(node);
-    scale = game->workspace_mode == RELAY_GAME_WORKSPACE_MAP ? 4 : 1;
-    terminal->grid_offset_x = (int64_t)(divider_x / 2 - 2) * scale -
-        node->grid_x - (int64_t)(card.width / 2) * scale;
-    terminal->grid_offset_y = (int64_t)(tb_height() / 2 - 3) * scale -
-        node->grid_y - (int64_t)(card.height / 2) * scale;
+    terminal->grid_offset_x = (int64_t)(divider_x / 2 - 2) -
+        node->grid_x - card.width / 2;
+    terminal->grid_offset_y = (int64_t)(tb_height() / 2 - 3) -
+        node->grid_y - card.height / 2;
 }
 
 /** Return the topmost graph node card at a terminal mouse coordinate. */
@@ -3103,9 +3459,13 @@ static Relay_NodeId relay_terminal_node_at(const Relay_Game *game,
 static Relay_TerminalPortHit relay_terminal_port_at(const Relay_Game *game,
     const Relay_Terminal *terminal, int mouse_x, int mouse_y)
 {
+    int divider_x;
     size_t index;
 
-    if (game->workspace_mode != RELAY_GAME_WORKSPACE_GRAPH) {
+    if (game->workspace_mode != RELAY_GAME_WORKSPACE_GRAPH ||
+        !relay_terminal_split(tb_width(), tb_height(), &divider_x) ||
+        mouse_x < 0 || mouse_x >= divider_x ||
+        mouse_y < 2 || mouse_y >= tb_height()) {
         return (Relay_TerminalPortHit){0};
     }
     for (index = relay_game_active_world_const(game)->count; index > 0;
@@ -3261,7 +3621,8 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
                 event->grid_delta_y = delta_y;
             } else if (terminal->dragging_grid) {
                 const int scale = game->workspace_mode ==
-                    RELAY_GAME_WORKSPACE_MAP ? 4 : 1;
+                    RELAY_GAME_WORKSPACE_MAP ?
+                        RELAY_TERMINAL_MAP_SCALE : 1;
 
                 terminal->grid_offset_x = relay_terminal_add_delta(
                     terminal->grid_offset_x, (int64_t)delta_x * scale);

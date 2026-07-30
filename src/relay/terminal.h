@@ -105,6 +105,14 @@ bool relay_terminal_draw(const Relay_Terminal *terminal, const Relay_Game *game,
 void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
     uint64_t node_id);
 
+/**
+ * Move the shared scene camera by one map step.
+ *
+ * direction_x and direction_y are normalized camera directions from -1 to 1.
+ */
+void relay_terminal_pan_map(Relay_Terminal *terminal, int direction_x,
+    int direction_y);
+
 /** Wait for and translate one terminal input event. */
 bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
     const Relay_SessionStore *sessions, Relay_TerminalOverlay overlay,
