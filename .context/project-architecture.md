@@ -12,9 +12,9 @@ Application code lives in `src/`. `src/relay/app.h` owns the root `Relay_App`
 state and its explicit lifecycle: uninitialized, initializing, running,
 shutting down, stopped, or failed. `relay_app_init`, `relay_app_run`, and
 `relay_app_shutdown` are the only application lifecycle entry points. The app
-owns a terminal backend, logger, synchronous main-thread event bus, and worker
-pool; future simulation, node graph, world, and UI systems should be added as
-independently owned app services.
+owns the terminal, logger, synchronous main-thread event bus, worker pool,
+script runtime, game state, and durable session store as independently
+lifecycle-managed services.
 
 `src/relay/platform.h` is the only platform classification surface; it supplies
 Windows, macOS, and Linux macros that can be used by all application sources.
@@ -55,9 +55,11 @@ and opened. Unsafe base globals and unordered table iteration are removed.
 Lua is syntax and execution infrastructure, not a second simulation.
 `src/script_runtime.c` compiles each module in an isolated environment, enforces
 integer-only source rules and deterministic instruction/memory limits, then
-invokes it with a read-only activation snapshot. Each placed module owns a
-bounded scalar state table; state and outputs commit only after a successful
-invocation. Lua headers and state pointers remain private and gameplay-facing
+invokes it with sealed typed input/output namespaces. Each placed module owns a
+bounded scalar state table; state, scalar outputs, and physical-item queue moves
+commit only after a successful invocation. Queue and item handles are
+generation-checked userdata backed by an activation-local transaction, never C
+pointers. Lua headers and state pointers remain private and gameplay-facing
 values stay project-owned. Script interfaces use the immutable `Type` enum
 namespace (`Type.TRIGGER`, material types, `Type.BOOLEAN`, and `Type.INTEGER`);
 the enum is built from one runtime registry and lowercase string type
@@ -84,8 +86,9 @@ process and never renders as a self-component. Compilation validates dependency
 acyclicity, recursively flattens child plans, and records external input fan-out
 and output-source bindings. Instantiation transactionally creates one visible
 wrapper plus private implementation nodes with Blueprint/node provenance.
-Runtime execution remains one graph and one previous-step wire model, never a
-nested or scripting-only simulator.
+Runtime execution remains one graph. Scalar control wires use previous-step
+snapshots, while physical-item wires transfer queue ownership in stable edge
+order; neither path creates a nested or scripting-only simulator.
 
 The source buffer contains ordinary top-level Lua-shaped architecture
 declarations: `local component = instance(namespace.member, ...)` plus typed
@@ -97,10 +100,10 @@ segments use strict lowercase snake_case; the parser rejects quoted references,
 spaces, uppercase characters, repeated/trailing underscores, and additional
 namespace separators transactionally. The Blueprint compiler blanks these
 declarative lines from the Lua runtime chunk while preserving diagnostic line
-numbers; the architecture parser owns them. `on_process(inputs, state)` is the
+numbers; the architecture parser owns them. `on_process(state, inputs, outputs)` is the
 deterministic activation observer.
 New Blueprint source starts with a compact Lua quick-reference covering typed
-ports, definition namespaces, activation behavior, persistent state, returned
+ports, definition namespaces, activation behavior, persistent state, named
 outputs, and `:w`. Graph synchronization preserves this user-visible header as
 ordinary source and only regenerates architecture declarations.
 Successful graph component creation, connection replacement, and movement
@@ -118,8 +121,8 @@ the prior connection or node boundary and preserve the last valid plan. Direct
 and indirect recursive dependencies are rejected. Interface-changing
 redeployment is rejected after instances or architecture references exist,
 while compatible code changes replace the Lua artifact transactionally. The
-implemented workflow is documented in `docs/BLUEPRINTS.md`; persistence,
-debugger, and broader language capability gates remain in
+implemented workflow is documented in `docs/BLUEPRINTS.md`; portable Blueprint
+exchange, debugger features, and broader language capability gates remain in
 `docs/SCRIPTING_BLUEPRINT_ROADMAP.md`.
 
 ## Game node boundary
@@ -162,15 +165,60 @@ terminal branch.
 
 The Shop sells optional Timer modules. A Timer emits a transient typed Trigger
 at a configurable 1, 2, 4, 8, or 16 second interval for script and control
-activation. Trigger and material values are one-step deliveries; Boolean,
-integer, and text values are retained levels. Blueprint `on_process` observers
-initialize once, then run only for nonzero transient inputs or changed level
-inputs. `Relay_App` uses a monotonic accumulator and executes simulation at a
+activation. Trigger values are one-step events; Boolean and Integer values are
+retained levels. Material ports own bounded FIFO queues of unique
+physical items. Blueprint `on_process` observers initialize once, then run for
+nonempty material inputs, nonzero Trigger inputs, or changed retained inputs.
+`Relay_App` uses a monotonic accumulator and executes simulation at a
 fixed 60 Hz independently of rendering. Each outer-loop iteration performs at
 most eight catch-up steps and retains remaining simulation debt, so slow
 presentation never silently discards authoritative steps. While debt remains,
 normal simulation redraws are skipped so processing catches up before presenting
 the next graph state.
+
+### Physical-item queue scripting
+
+Physical gameplay-item ports are bounded engine-owned FIFO queues; Boolean and
+Integer ports remain scalar signals. The script observer contract is
+`on_process(state, inputs, outputs)`, with both port namespaces accessed by
+their declared names. Item queue `pop` reserves one opaque move-only item inside
+the current activation transaction, and `push` consumes that reservation.
+Lua aliases never copy an item: pushing one alias twice, retaining a popped item
+without an output, using the wrong item type, or writing an item into persistent
+state invalidates and rolls back the entire activation. Queue operations, scalar
+outputs, and state changes commit atomically. Scripts cannot construct items;
+only authorized source definitions and data-driven recipes may create or
+transform them. Material outputs do not fan out, while control signals may.
+
+## Session persistence boundary
+
+`src/session.c` owns Relay's versioned, bounded, checksummed binary session
+codec. It stores authoritative Blueprint sources and revisions, root graph
+structure, flattened module provenance, scalar node state, persistent Lua
+state, unique item queues and next IDs, simulation step, currency, and workspace
+metadata. Lua registry references, definition pointers, jobs, event listeners,
+terminal handles, and viewport drag state are reconstructed or remain
+transient. Loading builds and validates a separate candidate, recompiles
+Blueprints in dependency order, rebinds all address-dependent definition views
+after moving owned storage, and replaces the active game only on complete
+success.
+
+`Relay_SessionStore` resolves `%USERPROFILE%\.relay` on Windows and
+`$HOME/.relay` on macOS/Linux. It scans bounded
+`sessions/<16-digit-session-id>/` directories; every slot owns `session.rly`
+plus separate draft and deployed Blueprint source files under `scripts/`.
+Checksummed `state.rly` contains only the last-played identity, so corrupt root
+metadata cannot hide otherwise valid slots. Saves flush a complete sibling
+staging directory before atomically installing it; overwrites retain the prior
+directory as a recoverable backup until the new slot and state commit.
+Initialization resolves interrupted `.tmp` and `.bak` directories and deletes
+the obsolete root-level single-session files without migration.
+
+`Relay_App` pauses simulation under the Continue, Saved Slots, New Session,
+save-choice, exit, and save-failure overlays. Continue opens the last-played
+valid slot. The Saved Slots browser loads by stable session ID. `S` chooses
+between overwriting the active slot and saving a new independent slot;
+confirmed exit uses the same choice before shutdown.
 
 ## Workspace renderer boundary
 
@@ -256,3 +304,17 @@ virtual-terminal output. The renderer has one responsive split: a large left
 playfield and a wider right control panel. It keeps a divider and panel headers
 visible whenever the terminal meets the minimum 43-column by 10-row layout;
 smaller terminals show a concise resize message instead.
+
+## Validation boundary
+
+`relay_runtime_test` covers event and job lifecycles, node queues and
+backpressure, typed graph constraints, Blueprint compilation and nesting,
+transactional Lua moves and rollback, session round trips, deterministic
+continuation, and corrupt/hostile save rejection. CTest is run under Debug,
+Release, AddressSanitizer, and UndefinedBehaviorSanitizer configurations.
+Clang static analysis covers the changed application ownership paths.
+
+`.github/workflows/build.yml` builds and runs the same runtime suite on current
+macOS, Ubuntu, and Windows runners. MSVC targets use the static C runtime.
+Release artifact inspection on macOS must show only system dynamic libraries;
+Lua, Termbox2, and Departure Mono symbols are linked into `bin/relay`.

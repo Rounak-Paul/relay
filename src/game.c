@@ -132,25 +132,55 @@ static void relay_game_step_timer(Relay_Node *node)
     }
 }
 
-/** Advance one autonomous fixed-rate source from immutable definition data. */
-static void relay_game_step_fixed_rate_source(Relay_Node *node)
+/** Advance one autonomous source without producing into a full item queue. */
+static bool relay_game_step_fixed_rate_source(Relay_NodeWorld *world,
+    Relay_Node *node)
 {
     const Relay_NodeSimulationDefinition *simulation =
         &node->definition->simulation;
+    const Relay_NodePortType output_type =
+        simulation->output_port_index < node->definition->output_count ?
+            node->definition->outputs[
+                simulation->output_port_index].type :
+            RELAY_NODE_PORT_TYPE_INVALID;
+    Relay_ItemQueue *queue;
+    size_t amount;
+    size_t index;
 
     if (simulation->interval_steps == 0 ||
-        simulation->output_port_index >= node->definition->output_count) {
-        return;
+        simulation->output_port_index >= node->definition->output_count ||
+        !relay_node_port_type_is_item(output_type) ||
+        simulation->output_amount <= 0 ||
+        (uint64_t)simulation->output_amount > RELAY_ITEM_QUEUE_CAPACITY) {
+        return false;
     }
-    node->progress++;
-    if ((uint64_t)node->progress >= simulation->interval_steps) {
-        node->progress = 0;
-        node->produced = node->produced >
-            INT64_MAX - simulation->output_amount ? INT64_MAX :
-            node->produced + simulation->output_amount;
-        node->output_values[simulation->output_port_index] =
-            simulation->output_amount;
+    if ((uint64_t)node->progress < simulation->interval_steps) {
+        node->progress++;
     }
+    if ((uint64_t)node->progress < simulation->interval_steps) {
+        return true;
+    }
+    queue = &node->output_queues[simulation->output_port_index];
+    amount = (size_t)simulation->output_amount;
+    if (queue->count > RELAY_ITEM_QUEUE_CAPACITY - amount) {
+        return true;
+    }
+    if (world->next_item_id > UINT64_MAX - amount) {
+        return false;
+    }
+    for (index = 0; index < amount; index++) {
+        Relay_Item item;
+
+        if (!relay_node_world_item_create(world, output_type, &item) ||
+            !relay_item_queue_push(queue, item)) {
+            return false;
+        }
+    }
+    node->progress = 0;
+    node->produced = node->produced >
+        INT64_MAX - simulation->output_amount ? INT64_MAX :
+        node->produced + simulation->output_amount;
+    return true;
 }
 
 /** Return a connected source value for a destination input in this tick. */
@@ -225,6 +255,9 @@ bool relay_game_init(Relay_Game *game, Relay_ScriptRuntime *script_runtime)
     game->script_runtime = script_runtime;
     game->active_tab = RELAY_GAME_PANEL_TAB_SHOP;
     game->workspace_mode = RELAY_GAME_WORKSPACE_GRAPH;
+    game->session_id = 1;
+    (void)snprintf(game->session_status, sizeof(game->session_status),
+        "New session");
     relay_game_set_focused_node(game, coal_miner_id);
     return true;
 }
@@ -538,6 +571,7 @@ bool relay_game_editor_insert(Relay_Game *game, uint32_t character)
 
     if (blueprint == NULL || (character != '\n' &&
             (character < 32 || character > 126)) ||
+        blueprint->revision == UINT64_MAX ||
         blueprint->source_size + 1 >= RELAY_BLUEPRINT_SOURCE_CAPACITY) {
         return false;
     }
@@ -557,7 +591,8 @@ bool relay_game_editor_backspace(Relay_Game *game)
 {
     Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
 
-    if (blueprint == NULL || blueprint->cursor == 0) {
+    if (blueprint == NULL || blueprint->cursor == 0 ||
+        blueprint->revision == UINT64_MAX) {
         return false;
     }
     (void)memmove(&blueprint->source[blueprint->cursor - 1],
@@ -576,7 +611,8 @@ bool relay_game_editor_delete(Relay_Game *game)
 {
     Relay_Blueprint *blueprint = relay_game_editing_blueprint(game);
 
-    if (blueprint == NULL || blueprint->cursor >= blueprint->source_size) {
+    if (blueprint == NULL || blueprint->cursor >= blueprint->source_size ||
+        blueprint->revision == UINT64_MAX) {
         return false;
     }
     (void)memmove(&blueprint->source[blueprint->cursor],
@@ -803,7 +839,8 @@ bool relay_game_editor_completion_accept(Relay_Game *game)
     selected = blueprint->completion_selection % count;
     replacement_size = blueprint->cursor - replacement_start;
     insertion_size = strlen(items[selected].insert_text);
-    if (blueprint->source_size - replacement_size + insertion_size + 1 >=
+    if (blueprint->revision == UINT64_MAX ||
+        blueprint->source_size - replacement_size + insertion_size + 1 >=
             RELAY_BLUEPRINT_SOURCE_CAPACITY) {
         return false;
     }
@@ -1036,12 +1073,18 @@ static void relay_game_step_script(Relay_Game *game, Relay_NodeWorld *world,
         return;
     }
     for (index = 0; index < blueprint->schema.input_count; index++) {
+        const Relay_NodePortType type = blueprint->schema.inputs[index].type;
+
+        if (relay_node_port_type_is_item(type)) {
+            if (!relay_item_queue_empty(&node->input_queues[index])) {
+                should_process = true;
+            }
+            continue;
+        }
         inputs[index] = relay_game_input_value(game, world, node, index);
-        if ((relay_node_port_type_is_transient(
-                    blueprint->schema.inputs[index].type) &&
+        if ((relay_node_port_type_is_transient(type) &&
                 inputs[index] != 0) ||
-            (!relay_node_port_type_is_transient(
-                    blueprint->schema.inputs[index].type) &&
+            (!relay_node_port_type_is_transient(type) &&
                 inputs[index] != node->process_input_values[index])) {
             should_process = true;
         }
@@ -1050,9 +1093,12 @@ static void relay_game_step_script(Relay_Game *game, Relay_NodeWorld *world,
     if (!should_process) {
         return;
     }
+    (void)memcpy(outputs, node->output_values, sizeof(outputs));
     if (relay_script_runtime_invoke(game->script_runtime, &blueprint->artifact,
-            &node->script_state, &blueprint->schema, inputs, outputs,
-            &blueprint->diagnostic)) {
+            &node->script_state, &blueprint->schema,
+            (Relay_ScriptInvocation){
+                node->input_queues, node->output_queues, inputs, outputs
+            }, &blueprint->diagnostic)) {
         node->process_activations++;
         for (index = 0; index < blueprint->schema.output_count; index++) {
             node->output_values[index] = outputs[index];
@@ -1060,11 +1106,117 @@ static void relay_game_step_script(Relay_Game *game, Relay_NodeWorld *world,
     }
 }
 
-/** Advance one node world through snapshots, sources, modules, and processors. */
-static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
+/** Move physical items across ordinary graph connections in stable order. */
+static void relay_game_step_item_connections(Relay_NodeWorld *world)
 {
     size_t index;
 
+    for (index = 0; index < world->connection_count; index++) {
+        const Relay_NodeConnection *connection = &world->connections[index];
+        Relay_Node *source = relay_node_world_find(world,
+            connection->source_node_id);
+        Relay_Node *destination = relay_node_world_find(world,
+            connection->destination_node_id);
+        const Relay_NodeDefinition *source_definition =
+            relay_node_definition_for(source);
+        const Relay_NodeDefinition *destination_definition =
+            relay_node_definition_for(destination);
+        Relay_NodePortType type;
+
+        if (source_definition == NULL || destination_definition == NULL ||
+            connection->source_port_index >= source_definition->output_count ||
+            connection->destination_port_index >=
+                destination_definition->input_count) {
+            continue;
+        }
+        type = source_definition->outputs[
+            connection->source_port_index].type;
+        if (relay_node_port_type_is_item(type) &&
+            relay_game_node_enabled(world, source) &&
+            relay_game_node_enabled(world, destination)) {
+            (void)relay_item_queue_transfer(
+                &source->output_queues[connection->source_port_index],
+                &destination->input_queues[
+                    connection->destination_port_index], type);
+        }
+    }
+}
+
+/** Move physical items through flattened module input/output boundaries. */
+static void relay_game_step_item_bindings(Relay_NodeWorld *world)
+{
+    size_t index;
+
+    for (index = 0; index < world->module_input_binding_count; index++) {
+        const Relay_NodeModuleInputBinding *binding =
+            &world->module_input_bindings[index];
+        Relay_Node *module = relay_node_world_find(world,
+            binding->module_node_id);
+        Relay_Node *destination = relay_node_world_find(world,
+            binding->destination_node_id);
+        const Relay_NodeDefinition *module_definition =
+            relay_node_definition_for(module);
+
+        if (module_definition != NULL && destination != NULL &&
+            binding->module_port_index < module_definition->input_count &&
+            relay_node_port_type_is_item(module_definition->inputs[
+                binding->module_port_index].type) &&
+            relay_game_node_enabled(world, module) &&
+            relay_game_node_enabled(world, destination)) {
+            (void)relay_item_queue_transfer(
+                &module->input_queues[binding->module_port_index],
+                &destination->input_queues[binding->destination_port_index],
+                module_definition->inputs[binding->module_port_index].type);
+        }
+    }
+    for (index = 0; index < world->module_output_binding_count; index++) {
+        const Relay_NodeModuleOutputBinding *binding =
+            &world->module_output_bindings[index];
+        Relay_Node *module = relay_node_world_find(world,
+            binding->module_node_id);
+        const Relay_NodeDefinition *module_definition =
+            relay_node_definition_for(module);
+        Relay_ItemQueue *source_queue;
+        Relay_NodePortType type;
+
+        if (module_definition == NULL ||
+            binding->module_port_index >= module_definition->output_count ||
+            !relay_game_node_enabled(world, module)) {
+            continue;
+        }
+        type = module_definition->outputs[binding->module_port_index].type;
+        if (!relay_node_port_type_is_item(type)) {
+            continue;
+        }
+        if (binding->source_is_module_input) {
+            if (binding->source_module_input_port_index >=
+                    module_definition->input_count) {
+                continue;
+            }
+            source_queue = &module->input_queues[
+                binding->source_module_input_port_index];
+        } else {
+            Relay_Node *source = relay_node_world_find(world,
+                binding->source_node_id);
+
+            if (source == NULL || !relay_game_node_enabled(world, source)) {
+                continue;
+            }
+            source_queue =
+                &source->output_queues[binding->source_port_index];
+        }
+        (void)relay_item_queue_transfer(source_queue,
+            &module->output_queues[binding->module_port_index], type);
+    }
+}
+
+/** Advance one node world through transport, sources, and processors. */
+static bool relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
+{
+    size_t index;
+
+    relay_game_step_item_connections(world);
+    relay_game_step_item_bindings(world);
     for (index = 0; index < world->count; index++) {
         Relay_Node *node = &world->nodes[index];
         const Relay_NodeDefinition *definition =
@@ -1107,7 +1259,9 @@ static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
             node->definition != NULL &&
             node->definition->simulation.behavior ==
                 RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
-            relay_game_step_fixed_rate_source(node);
+            if (!relay_game_step_fixed_rate_source(world, node)) {
+                return false;
+            }
         }
     }
     for (index = 0; index < world->module_output_binding_count; index++) {
@@ -1134,6 +1288,7 @@ static void relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
             }
         }
     }
+    return relay_node_world_items_valid(world);
 }
 
 bool relay_game_step(Relay_Game *game)
@@ -1141,7 +1296,9 @@ bool relay_game_step(Relay_Game *game)
     if (game == NULL || game->script_runtime == NULL) {
         return false;
     }
-    relay_game_step_world(game, &game->nodes);
+    if (!relay_game_step_world(game, &game->nodes)) {
+        return false;
+    }
     game->simulation_step++;
     return true;
 }

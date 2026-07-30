@@ -10,15 +10,15 @@ static const char relay_blueprint_default_source[] =
     "-- Relay Blueprint\n"
     "-- Ports: input/output with Type.*.\n"
     "-- Components: source.*, control.*, or script.*.\n"
-    "-- on_process gets read-only inputs; state persists per instance.\n"
-    "-- Return declared outputs. Save with :w.\n"
+    "-- on_process(state, inputs, outputs); state persists per instance.\n"
+    "-- Read inputs and write outputs by port name. Save with :w.\n"
     "\n"
     "input(\"trigger\", Type.TRIGGER)\n"
     "output(\"trigger_out\", Type.TRIGGER)\n"
     "\n"
-    "function on_process(inputs, state)\n"
+    "function on_process(state, inputs, outputs)\n"
     "  state.activations = (state.activations or 0) + 1\n"
-    "  return { trigger_out = inputs.trigger or 0 }\n"
+    "  outputs.trigger_out = inputs.trigger\n"
     "end\n";
 
 static bool relay_blueprint_scene_create_system_nodes(
@@ -1056,7 +1056,27 @@ static bool relay_blueprint_plan_build(Relay_BlueprintLibrary *library,
         return false;
     }
     for (index = 0; index < blueprint->schema.input_count; index++) {
-        if (!relay_blueprint_plan_add_input_binding(plan,
+        size_t connection_index;
+        bool item_is_visually_mapped = false;
+
+        if (relay_node_port_type_is_item(
+                blueprint->schema.inputs[index].type)) {
+            for (connection_index = 0;
+                    connection_index < blueprint->scene.connection_count;
+                    connection_index++) {
+                const Relay_NodeConnection *connection =
+                    &blueprint->scene.connections[connection_index];
+
+                if (connection->source_node_id ==
+                        blueprint->input_boundary_node_id &&
+                    connection->source_port_index == index) {
+                    item_is_visually_mapped = true;
+                    break;
+                }
+            }
+        }
+        if (!item_is_visually_mapped &&
+            !relay_blueprint_plan_add_input_binding(plan,
                 (Relay_BlueprintPlanInputBinding){index, 0, index})) {
             relay_blueprint_plan_shutdown(plan);
             return false;
@@ -1231,7 +1251,7 @@ Relay_BlueprintId relay_blueprint_library_create(
     }
     blueprint = &library->blueprints[library->count];
     *blueprint = (Relay_Blueprint){0};
-    blueprint->id = library->next_id++;
+    blueprint->id = library->next_id;
     (void)snprintf(blueprint->name, sizeof(blueprint->name), "script_%llu",
         (unsigned long long)blueprint->id);
     (void)snprintf(blueprint->key, sizeof(blueprint->key),
@@ -1249,6 +1269,7 @@ Relay_BlueprintId relay_blueprint_library_create(
         return 0;
     }
     library->count++;
+    library->next_id++;
     return blueprint->id;
 }
 
@@ -1304,6 +1325,7 @@ bool relay_blueprint_rebuild_plan(Relay_BlueprintLibrary *library,
         blueprint == NULL ? 0 : blueprint->revision + 1;
 
     if (library == NULL || blueprint == NULL ||
+        blueprint->revision == UINT64_MAX ||
         !relay_blueprint_source_from_scene(blueprint, candidate_source,
             &candidate_source_size) ||
         !relay_blueprint_runtime_source(candidate_source,
@@ -1315,15 +1337,20 @@ bool relay_blueprint_rebuild_plan(Relay_BlueprintLibrary *library,
         !relay_blueprint_plan_build(library, blueprint, &candidate)) {
         relay_script_artifact_shutdown(library == NULL ? NULL :
             library->runtime, &candidate_artifact);
+        relay_blueprint_plan_shutdown(&candidate);
         return false;
     }
     relay_script_artifact_shutdown(library->runtime, &blueprint->artifact);
     relay_blueprint_plan_shutdown(&blueprint->plan);
+    candidate.revision = candidate_revision;
     blueprint->artifact = candidate_artifact;
     blueprint->plan = candidate;
     (void)memcpy(blueprint->source, candidate_source,
         candidate_source_size + 1);
     blueprint->source_size = candidate_source_size;
+    (void)memcpy(blueprint->deployed_source, candidate_source,
+        candidate_source_size + 1);
+    blueprint->deployed_source_size = candidate_source_size;
     blueprint->revision = candidate_revision;
     blueprint->compiled_revision = candidate_revision;
     blueprint->dirty = false;
@@ -1403,6 +1430,9 @@ bool relay_blueprint_compile(Relay_BlueprintLibrary *library,
     relay_blueprint_plan_shutdown(&blueprint->plan);
     blueprint->artifact = candidate_artifact;
     blueprint->plan = candidate_plan;
+    (void)memcpy(blueprint->deployed_source, blueprint->source,
+        blueprint->source_size + 1);
+    blueprint->deployed_source_size = blueprint->source_size;
     blueprint->compiled_revision = blueprint->revision;
     blueprint->dirty = false;
     (void)snprintf(blueprint->diagnostic.message,
@@ -1520,6 +1550,113 @@ cleanup:
     }
     free(node_ids);
     return success;
+}
+
+/** Resolve one node's immutable definition from stable runtime provenance. */
+static const Relay_NodeDefinition *relay_blueprint_node_definition_rebind(
+    Relay_BlueprintLibrary *library, const Relay_Node *node)
+{
+    Relay_Blueprint *blueprint;
+
+    if (node->runtime_kind == RELAY_NODE_RUNTIME_ATOMIC) {
+        return relay_node_definition_find(node->definition_id);
+    }
+    blueprint = relay_blueprint_library_find(library, node->blueprint_id);
+    if (blueprint == NULL) {
+        return NULL;
+    }
+    if (node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER) {
+        return &blueprint->definition;
+    }
+    if (node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
+        return &blueprint->process_definition;
+    }
+    if (node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
+        return &blueprint->input_boundary_definition;
+    }
+    if (node->runtime_kind == RELAY_NODE_RUNTIME_BLUEPRINT_OUTPUT_BOUNDARY) {
+        return &blueprint->output_boundary_definition;
+    }
+    return NULL;
+}
+
+/** Rebind every node in one world to storage owned by its current library. */
+static bool relay_blueprint_world_rebind(Relay_BlueprintLibrary *library,
+    Relay_NodeWorld *world)
+{
+    size_t index;
+
+    for (index = 0; index < world->count; index++) {
+        Relay_Node *node = &world->nodes[index];
+        const Relay_NodeDefinition *definition =
+            relay_blueprint_node_definition_rebind(library, node);
+
+        if (definition == NULL || definition->id != node->definition_id) {
+            return false;
+        }
+        node->definition = definition;
+    }
+    return true;
+}
+
+bool relay_blueprint_library_rebind_storage(Relay_BlueprintLibrary *library,
+    Relay_NodeWorld *runtime_world)
+{
+    size_t blueprint_index;
+
+    if (library == NULL || runtime_world == NULL || library->runtime == NULL ||
+        library->count > RELAY_BLUEPRINT_CAPACITY) {
+        return false;
+    }
+    for (blueprint_index = 0; blueprint_index < library->count;
+            blueprint_index++) {
+        relay_blueprint_definition_refresh(
+            &library->blueprints[blueprint_index]);
+    }
+    for (blueprint_index = 0; blueprint_index < library->count;
+            blueprint_index++) {
+        Relay_Blueprint *blueprint = &library->blueprints[blueprint_index];
+        size_t plan_index;
+
+        if (!relay_blueprint_world_rebind(library, &blueprint->scene)) {
+            return false;
+        }
+        for (plan_index = 0; plan_index < blueprint->plan.node_count;
+                plan_index++) {
+            Relay_BlueprintPlanNode *plan_node =
+                &blueprint->plan.nodes[plan_index];
+            const Relay_NodeDefinition *definition = NULL;
+
+            if (plan_node->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
+                Relay_Blueprint *owner = relay_blueprint_library_find(library,
+                    plan_node->script_blueprint_id);
+
+                definition = owner == NULL ? NULL :
+                    &owner->process_definition;
+            } else if (plan_node->runtime_kind ==
+                    RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER) {
+                Relay_Blueprint *owner = relay_blueprint_library_find(library,
+                    plan_node->script_blueprint_id);
+
+                definition = owner == NULL ? NULL : &owner->definition;
+            } else {
+                Relay_Blueprint *origin = relay_blueprint_library_find(library,
+                    plan_node->origin_blueprint_id);
+                const Relay_Node *origin_node = origin == NULL ? NULL :
+                    relay_node_world_find_const(&origin->scene,
+                        plan_node->origin_node_id);
+
+                definition = origin_node == NULL ? NULL :
+                    origin_node->definition;
+            }
+            if (definition == NULL) {
+                return false;
+            }
+            plan_node->definition = definition;
+        }
+    }
+    return relay_blueprint_world_rebind(library, runtime_world);
 }
 
 void relay_blueprint_library_shutdown(Relay_BlueprintLibrary *library)

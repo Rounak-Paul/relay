@@ -25,6 +25,7 @@ add_custom_target(relay_assets DEPENDS "${RELAY_FONT_HEADER}")
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 if(NOT WIN32 AND NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Relay supports Windows, macOS, and Linux only.")
@@ -88,6 +89,7 @@ add_executable(relay
     src/main.c
     src/node.c
     src/node_renderer.c
+    src/session.c
     src/script_runtime.c
     src/script_language.c
     src/terminal.c
@@ -138,12 +140,15 @@ if(BUILD_TESTING)
         src/event.c
         src/game.c
         src/job_system.c
+        src/logger.c
         src/node.c
         src/node_renderer.c
+        src/session.c
         src/script_runtime.c
         src/script_language.c
         tests/script_runtime_test.c
         tests/script_language_test.c
+        tests/session_test.c
     )
     target_include_directories(relay_runtime_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(relay_runtime_test PRIVATE Threads::Threads relay_lua)
@@ -152,5 +157,17 @@ if(BUILD_TESTING)
     else()
         target_compile_options(relay_runtime_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
+    if(UNIX)
+        target_compile_definitions(relay_runtime_test PRIVATE
+            _DEFAULT_SOURCE
+            _XOPEN_SOURCE=700
+        )
+    endif()
+    if(APPLE)
+        target_compile_definitions(relay_runtime_test PRIVATE _DARWIN_C_SOURCE)
+    endif()
+    target_compile_definitions(relay_runtime_test PRIVATE
+        RELAY_TEST_SESSION_DIRECTORY="${PROJECT_BINARY_DIR}/relay-session-test"
+    )
     add_test(NAME relay_runtime COMMAND relay_runtime_test)
 endif()

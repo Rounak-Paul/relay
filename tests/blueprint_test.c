@@ -27,33 +27,33 @@ static bool relay_test_compact_architecture_source(void)
         "-- Relay Blueprint\n"
         "-- Ports: input/output with Type.*.\n"
         "-- Components: source.*, control.*, or script.*.\n"
-        "-- on_process gets read-only inputs; state persists per instance.\n"
-        "-- Return declared outputs. Save with :w.\n"
+        "-- on_process(state, inputs, outputs); state persists per instance.\n"
+        "-- Read inputs and write outputs by port name. Save with :w.\n"
         "\n"
         "input(\"trigger\", Type.TRIGGER)\n"
         "output(\"trigger_out\", Type.TRIGGER)\n"
         "\n"
         "local n3 = instance(source.coal_miner, { x = 90, y = 0 })\n"
         "\n"
-        "function on_process(inputs, state)\n"
+        "function on_process(state, inputs, outputs)\n"
         "  state.activations = (state.activations or 0) + 1\n"
-        "  return { trigger_out = inputs.trigger or 0 }\n"
+        "  outputs.trigger_out = inputs.trigger\n"
         "end\n";
     static const char expected_moved[] =
         "-- Relay Blueprint\n"
         "-- Ports: input/output with Type.*.\n"
         "-- Components: source.*, control.*, or script.*.\n"
-        "-- on_process gets read-only inputs; state persists per instance.\n"
-        "-- Return declared outputs. Save with :w.\n"
+        "-- on_process(state, inputs, outputs); state persists per instance.\n"
+        "-- Read inputs and write outputs by port name. Save with :w.\n"
         "\n"
         "input(\"trigger\", Type.TRIGGER)\n"
         "output(\"trigger_out\", Type.TRIGGER)\n"
         "\n"
         "local n3 = instance(source.coal_miner, { x = 95, y = 0 })\n"
         "\n"
-        "function on_process(inputs, state)\n"
+        "function on_process(state, inputs, outputs)\n"
         "  state.activations = (state.activations or 0) + 1\n"
-        "  return { trigger_out = inputs.trigger or 0 }\n"
+        "  outputs.trigger_out = inputs.trigger\n"
         "end\n";
     Relay_ScriptRuntime scripts = {0};
     Relay_Game game = {0};
@@ -96,8 +96,8 @@ static bool relay_test_reject_quoted_component_reference(void)
         "\n"
         "local n3 = instance(\"source.coal_miner\", { x = 90, y = 0 })\n"
         "\n"
-        "function on_process(inputs, state)\n"
-        "  return { trigger_out = inputs.trigger or 0 }\n"
+        "function on_process(state, inputs, outputs)\n"
+        "  outputs.trigger_out = inputs.trigger\n"
         "end\n";
     Relay_ScriptRuntime scripts = {0};
     Relay_Game game = {0};
@@ -140,8 +140,10 @@ int relay_blueprint_test(void)
     static const char incompatible_source[] =
         "input('coal', Type.COAL)\n"
         "output('coal_out', Type.COAL)\n"
-        "function on_process(inputs, state)\n"
-        "  return { coal_out = inputs.coal or 0 }\n"
+        "function on_process(state, inputs, outputs)\n"
+        "  if #inputs.coal > 0 and #outputs.coal_out < outputs.coal_out.capacity then\n"
+        "    outputs.coal_out:push(inputs.coal:pop())\n"
+        "  end\n"
         "end\n";
     Relay_ScriptRuntime scripts = {0};
     Relay_Game game = {0};

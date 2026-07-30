@@ -31,7 +31,11 @@ typedef enum Relay_TerminalKey {
 /** Center-screen terminal overlay states owned by the application. */
 typedef enum Relay_TerminalOverlay {
     RELAY_TERMINAL_OVERLAY_NONE,
-    RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM
+    RELAY_TERMINAL_OVERLAY_SESSION_MENU,
+    RELAY_TERMINAL_OVERLAY_SLOT_SELECT,
+    RELAY_TERMINAL_OVERLAY_SAVE_SELECT,
+    RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM,
+    RELAY_TERMINAL_OVERLAY_SAVE_FAILED
 } Relay_TerminalOverlay;
 
 /** Event categories produced by Relay's terminal adapter. */
@@ -63,6 +67,7 @@ typedef struct Relay_TerminalEvent {
 } Relay_TerminalEvent;
 
 typedef struct Relay_Game Relay_Game;
+typedef struct Relay_SessionStore Relay_SessionStore;
 
 /** Platform terminal state owned by the Relay application. */
 typedef struct Relay_Terminal {
@@ -93,7 +98,7 @@ bool relay_terminal_init(Relay_Terminal *terminal);
 
 /** Render Relay's current game and control-panel state. */
 bool relay_terminal_draw(const Relay_Terminal *terminal, const Relay_Game *game,
-    Relay_TerminalOverlay overlay);
+    const Relay_SessionStore *sessions, Relay_TerminalOverlay overlay);
 
 /** Center the graph viewport on a node when a game action focuses it. */
 void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
@@ -101,6 +106,7 @@ void relay_terminal_focus_node(Relay_Terminal *terminal, const Relay_Game *game,
 
 /** Wait for and translate one terminal input event. */
 bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
+    const Relay_SessionStore *sessions, Relay_TerminalOverlay overlay,
     Relay_TerminalEvent *event);
 
 /** Restore the terminal backend to its prior state. */

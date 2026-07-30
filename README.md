@@ -37,6 +37,14 @@ long-term capability model.
 Runtime diagnostics are written only to `logs/relay.log`, keeping the terminal
 surface reserved for the game UI.
 
+Relay stores a bounded multi-slot repository under `%USERPROFILE%\.relay\` on
+Windows and `$HOME/.relay/` on macOS and Linux. Each session ID owns a
+`sessions/<id>/session.rly` snapshot and separate draft/deployed Blueprint
+files under `scripts/`. The checksummed `state.rly` records only the last-played
+slot. Startup offers Continue, Saved Slots, and New Session. Press `S` during
+graph play to overwrite the active slot or save into a new slot; confirmed exit
+uses the same choice and reports failures in the TUI.
+
 The application owns a main-thread observer bus and a cross-platform worker
 pool. Their thread-safety and ownership rules are documented for contributors
 in [AGENTS.md](AGENTS.md).
@@ -51,7 +59,9 @@ resource per second while enabled; it has no material or control input. A Timer
 emits a typed `Trigger` event at a configurable interval for scripts and future
 control nodes. Press Tab or click a panel tab to switch between Shop, Inspector,
 and Scripts. Click a node title to focus it and open its Inspector. Miner
-Inspectors show output type, fixed rate, progress, and lifetime production. The
+Inspectors show output type, queue occupancy, fixed rate, progress, and lifetime
+production. Every material is a unique physical item with a stable persisted
+ID, and every material port owns a bounded FIFO rather than a scalar count. The
 Timer Inspector uses `[` and `]` to choose an interval of 1, 2, 4, 8, or 16
 seconds.
 
@@ -59,9 +69,10 @@ The main workspace begins with a `Relay` tab. It is an unbounded graph canvas:
 drag with the left mouse button to pan its grid, and purchased sources appear
 as node cards with input and output ports. Drag a node card to move its world
 grid position from its title bar; drag empty canvas space to pan the viewport.
-Graph links are
-typed and replace the destination input's prior link, which is the same graph
-contract future script-authored modules will use. Connected ports are joined by
+Graph links are typed and replace the destination input's prior link, which is
+the same graph contract script-authored modules use. Control outputs may fan
+out; physical-item outputs have one destination so a unique item cannot be
+copied into multiple queues. Connected ports are joined by
 cyan orthogonal wires with rounded turns and short port stubs, rendered behind
 the cards. A matching live wire previews its route while you drag from either
 port direction; forward links use the minimal centered path, while reverse
@@ -74,7 +85,7 @@ Every purchased node becomes the viewport focus. Press `m` to toggle the Relay
 map view, which zooms out to compact node names; drag its empty space to pan at
 the map scale. Escape is always Back: it first returns from map view, then
 opens a centered exit confirmation from the graph view. Press Enter there to
-exit, or Escape to cancel. `q` never exits the game.
+save and exit, or Escape to cancel. `q` never exits the game.
 
 ## Script Blueprints
 
@@ -105,6 +116,15 @@ compile leaves the prior installed revision running and shows the diagnostic in
 the right panel. Escape from normal mode returns to the graph without closing
 the application. Escape from a Blueprint graph returns to Relay; a subsequent
 Escape from Relay opens the exit confirmation.
+
+Blueprint observers use
+`on_process(state, inputs, outputs)`. Boolean, Integer, and Trigger ports use
+typed scalar access. Material ports expose bounded queues: scripts inspect
+them with `#queue` and `queue.capacity`, reserve the oldest input with
+`inputs.name:pop()`, and move it with `outputs.name:push(item)`. The activation
+is transactional; duplicate aliases, unresolved items, wrong types, stale
+handles, runtime faults, or invalid persistent state roll back queues, scalar
+outputs, and `state` together.
 
 ## Embedded font
 

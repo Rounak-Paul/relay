@@ -6,6 +6,7 @@
 #include "relay/job_system.h"
 #include "relay/logger.h"
 #include "relay/script_runtime.h"
+#include "relay/session.h"
 #include "relay/terminal.h"
 
 #include <stdbool.h>
@@ -28,10 +29,13 @@ typedef struct Relay_App {
     Relay_Logger logger;
     Relay_ScriptRuntime scripts;
     Relay_Game game;
+    Relay_SessionStore sessions;
     Relay_JobSystem jobs;
     Relay_Terminal terminal;
     Relay_TerminalOverlay overlay;
+    Relay_SessionSaveMode pending_save_mode;
     bool should_exit;
+    bool exit_after_save;
     double last_frame_seconds;
     double simulation_accumulator;
 } Relay_App;

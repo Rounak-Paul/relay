@@ -252,6 +252,7 @@ bool relay_node_world_init(Relay_NodeWorld *world)
     }
     *world = (Relay_NodeWorld){0};
     world->next_id = 1;
+    world->next_item_id = 1;
     return true;
 }
 
@@ -268,17 +269,13 @@ Relay_NodeId relay_node_world_create_definition(Relay_NodeWorld *world,
     Relay_Node *node;
     Relay_NodeId id;
 
-    if (world == NULL || !relay_node_definition_valid(definition) ||
+    if (world == NULL || world->next_id == 0 ||
+        world->next_id == UINT64_MAX ||
+        !relay_node_definition_valid(definition) ||
         !relay_node_world_grow(world)) {
         return 0;
     }
     id = world->next_id++;
-    if (id == 0) {
-        id = world->next_id++;
-        if (id == 0) {
-            return 0;
-        }
-    }
     node = &world->nodes[world->count++];
     *node = (Relay_Node){0};
     node->id = id;
@@ -371,11 +368,206 @@ bool relay_node_port_types_compatible(Relay_NodePortType source_type,
 
 bool relay_node_port_type_is_transient(Relay_NodePortType type)
 {
-    return type == RELAY_NODE_PORT_TYPE_TRIGGER ||
-        type == RELAY_NODE_PORT_TYPE_COAL ||
+    return type == RELAY_NODE_PORT_TYPE_TRIGGER;
+}
+
+bool relay_node_port_type_is_item(Relay_NodePortType type)
+{
+    return type == RELAY_NODE_PORT_TYPE_COAL ||
         type == RELAY_NODE_PORT_TYPE_IRON_ORE ||
         type == RELAY_NODE_PORT_TYPE_COPPER_ORE ||
         type == RELAY_NODE_PORT_TYPE_STONE;
+}
+
+bool relay_item_queue_empty(const Relay_ItemQueue *queue)
+{
+    return queue == NULL || queue->count == 0;
+}
+
+bool relay_item_queue_full(const Relay_ItemQueue *queue)
+{
+    return queue == NULL || queue->count >= RELAY_ITEM_QUEUE_CAPACITY;
+}
+
+bool relay_item_queue_peek(const Relay_ItemQueue *queue, Relay_Item *item)
+{
+    if (queue == NULL || item == NULL || queue->count == 0 ||
+        queue->head >= RELAY_ITEM_QUEUE_CAPACITY) {
+        return false;
+    }
+    *item = queue->items[queue->head];
+    return true;
+}
+
+bool relay_item_queue_push(Relay_ItemQueue *queue, Relay_Item item)
+{
+    size_t tail;
+
+    if (queue == NULL || item.id == 0 ||
+        !relay_node_port_type_is_item(item.type) ||
+        queue->head >= RELAY_ITEM_QUEUE_CAPACITY ||
+        queue->count >= RELAY_ITEM_QUEUE_CAPACITY) {
+        return false;
+    }
+    tail = (queue->head + queue->count) % RELAY_ITEM_QUEUE_CAPACITY;
+    queue->items[tail] = item;
+    queue->count++;
+    return true;
+}
+
+bool relay_item_queue_pop(Relay_ItemQueue *queue, Relay_Item *item)
+{
+    if (!relay_item_queue_peek(queue, item)) {
+        return false;
+    }
+    queue->items[queue->head] = (Relay_Item){0};
+    queue->head = (queue->head + 1) % RELAY_ITEM_QUEUE_CAPACITY;
+    queue->count--;
+    if (queue->count == 0) {
+        queue->head = 0;
+    }
+    return true;
+}
+
+bool relay_item_queue_transfer(Relay_ItemQueue *source,
+    Relay_ItemQueue *destination, Relay_NodePortType expected_type)
+{
+    Relay_Item item;
+
+    if (source == NULL || destination == NULL || source == destination ||
+        relay_item_queue_full(destination) ||
+        !relay_item_queue_peek(source, &item) || item.type != expected_type ||
+        !relay_node_port_type_is_item(expected_type)) {
+        return false;
+    }
+    if (!relay_item_queue_push(destination, item)) {
+        return false;
+    }
+    (void)relay_item_queue_pop(source, &item);
+    return true;
+}
+
+bool relay_node_world_item_create(Relay_NodeWorld *world,
+    Relay_NodePortType type, Relay_Item *item)
+{
+    Relay_ItemId id;
+
+    if (world == NULL || item == NULL ||
+        !relay_node_port_type_is_item(type) || world->next_item_id == 0) {
+        return false;
+    }
+    id = world->next_item_id++;
+    if (world->next_item_id == 0) {
+        world->next_item_id = id;
+        return false;
+    }
+    *item = (Relay_Item){id, type};
+    return true;
+}
+
+/** Compare stable item identities for deterministic duplicate validation. */
+static int relay_node_item_id_compare(const void *left, const void *right)
+{
+    const Relay_ItemId left_id = *(const Relay_ItemId *)left;
+    const Relay_ItemId right_id = *(const Relay_ItemId *)right;
+
+    return (left_id > right_id) - (left_id < right_id);
+}
+
+/** Validate one queue and append its item identities to caller storage. */
+static bool relay_node_queue_items_valid(const Relay_ItemQueue *queue,
+    Relay_NodePortType type, Relay_ItemId *ids, size_t *id_count,
+    size_t id_capacity, Relay_ItemId next_item_id)
+{
+    size_t index;
+
+    if (queue->head >= RELAY_ITEM_QUEUE_CAPACITY ||
+        queue->count > RELAY_ITEM_QUEUE_CAPACITY ||
+        !relay_node_port_type_is_item(type)) {
+        return false;
+    }
+    for (index = 0; index < queue->count; index++) {
+        const Relay_Item item = queue->items[
+            (queue->head + index) % RELAY_ITEM_QUEUE_CAPACITY];
+
+        if (item.id == 0 || item.id >= next_item_id || item.type != type ||
+            *id_count >= id_capacity) {
+            return false;
+        }
+        ids[(*id_count)++] = item.id;
+    }
+    return true;
+}
+
+bool relay_node_world_items_valid(const Relay_NodeWorld *world)
+{
+    Relay_ItemId *ids;
+    size_t id_count = 0;
+    size_t id_capacity;
+    size_t node_index;
+    bool valid = true;
+
+    if (world == NULL || world->next_item_id == 0 ||
+        world->count > SIZE_MAX / (RELAY_NODE_MAX_PORTS * 2U) ||
+        world->count * RELAY_NODE_MAX_PORTS * 2U >
+            SIZE_MAX / RELAY_ITEM_QUEUE_CAPACITY) {
+        return false;
+    }
+    id_capacity = world->count * RELAY_NODE_MAX_PORTS * 2U *
+        RELAY_ITEM_QUEUE_CAPACITY;
+    if (id_capacity > SIZE_MAX / sizeof(*ids)) {
+        return false;
+    }
+    ids = id_capacity == 0 ? NULL : malloc(id_capacity * sizeof(*ids));
+    if (ids == NULL && id_capacity > 0) {
+        return false;
+    }
+    for (node_index = 0; node_index < world->count && valid; node_index++) {
+        const Relay_Node *node = &world->nodes[node_index];
+        const Relay_NodeDefinition *definition =
+            relay_node_definition_for(node);
+        size_t port_index;
+
+        if (definition == NULL) {
+            valid = false;
+            break;
+        }
+        for (port_index = 0; port_index < RELAY_NODE_MAX_PORTS; port_index++) {
+            const bool input_item = port_index < definition->input_count &&
+                relay_node_port_type_is_item(
+                    definition->inputs[port_index].type);
+            const bool output_item = port_index < definition->output_count &&
+                relay_node_port_type_is_item(
+                    definition->outputs[port_index].type);
+
+            if ((input_item &&
+                    !relay_node_queue_items_valid(
+                        &node->input_queues[port_index],
+                        definition->inputs[port_index].type, ids, &id_count,
+                        id_capacity, world->next_item_id)) ||
+                (!input_item && node->input_queues[port_index].count != 0) ||
+                (output_item &&
+                    !relay_node_queue_items_valid(
+                        &node->output_queues[port_index],
+                        definition->outputs[port_index].type, ids, &id_count,
+                        id_capacity, world->next_item_id)) ||
+                (!output_item && node->output_queues[port_index].count != 0)) {
+                valid = false;
+                break;
+            }
+        }
+    }
+    if (valid && id_count > 1) {
+        qsort(ids, id_count, sizeof(*ids), relay_node_item_id_compare);
+        for (node_index = 1; node_index < id_count; node_index++) {
+            if (ids[node_index - 1] == ids[node_index]) {
+                valid = false;
+                break;
+            }
+        }
+    }
+    free(ids);
+    return valid;
 }
 
 bool relay_node_world_connect(Relay_NodeWorld *world, Relay_NodeId source_node_id,
@@ -396,6 +588,7 @@ bool relay_node_world_connect(Relay_NodeWorld *world, Relay_NodeId source_node_i
     source_definition = relay_node_definition_for(source);
     destination_definition = relay_node_definition_for(destination);
     if (source_definition == NULL || destination_definition == NULL ||
+        source->module_instance_id != destination->module_instance_id ||
         source_port_index >= source_definition->output_count ||
         destination_port_index >= destination_definition->input_count ||
         !relay_node_port_types_compatible(
@@ -403,9 +596,40 @@ bool relay_node_world_connect(Relay_NodeWorld *world, Relay_NodeId source_node_i
             destination_definition->inputs[destination_port_index].type)) {
         return false;
     }
+    for (index = 0; index < world->module_input_binding_count; index++) {
+        const Relay_NodeModuleInputBinding *binding =
+            &world->module_input_bindings[index];
+
+        if (binding->destination_node_id == destination_node_id &&
+            binding->destination_port_index == destination_port_index) {
+            return false;
+        }
+    }
+    if (relay_node_port_type_is_item(
+            source_definition->outputs[source_port_index].type)) {
+        for (index = 0; index < world->module_output_binding_count; index++) {
+            const Relay_NodeModuleOutputBinding *binding =
+                &world->module_output_bindings[index];
+
+            if (!binding->source_is_module_input &&
+                binding->source_node_id == source_node_id &&
+                binding->source_port_index == source_port_index) {
+                return false;
+            }
+        }
+    }
     for (index = 0; index < world->connection_count; index++) {
         Relay_NodeConnection *connection = &world->connections[index];
 
+        if (relay_node_port_type_is_item(
+                source_definition->outputs[source_port_index].type) &&
+            connection->source_node_id == source_node_id &&
+            connection->source_port_index == source_port_index &&
+            (connection->destination_node_id != destination_node_id ||
+                connection->destination_port_index !=
+                    destination_port_index)) {
+            return false;
+        }
         if (connection->destination_node_id == destination_node_id &&
             connection->destination_port_index == destination_port_index) {
             *connection = (Relay_NodeConnection){source_node_id, source_port_index,
@@ -449,6 +673,7 @@ bool relay_node_world_bind_module_input(Relay_NodeWorld *world,
     const Relay_Node *destination;
     const Relay_NodeDefinition *module_definition;
     const Relay_NodeDefinition *destination_definition;
+    size_t index;
 
     if (world == NULL) {
         return false;
@@ -460,6 +685,8 @@ bool relay_node_world_bind_module_input(Relay_NodeWorld *world,
     destination_definition = relay_node_definition_for(destination);
     if (module == NULL || destination == NULL ||
         module->runtime_kind != RELAY_NODE_RUNTIME_BLUEPRINT_WRAPPER ||
+        module->module_instance_id != 0 ||
+        destination->module_instance_id != module->id ||
         module_definition == NULL || destination_definition == NULL ||
         binding.module_port_index >= module_definition->input_count ||
         binding.destination_port_index >= destination_definition->input_count ||
@@ -467,7 +694,39 @@ bool relay_node_world_bind_module_input(Relay_NodeWorld *world,
             module_definition->inputs[binding.module_port_index].type,
             destination_definition->inputs[
                 binding.destination_port_index].type) ||
-        !relay_node_world_grow_bindings(
+        relay_node_world_connection_to(world, binding.destination_node_id,
+            binding.destination_port_index) != NULL) {
+        return false;
+    }
+    for (index = 0; index < world->module_input_binding_count; index++) {
+        const Relay_NodeModuleInputBinding *existing =
+            &world->module_input_bindings[index];
+
+        if ((existing->destination_node_id == binding.destination_node_id &&
+                existing->destination_port_index ==
+                    binding.destination_port_index) ||
+            (relay_node_port_type_is_item(module_definition->inputs[
+                    binding.module_port_index].type) &&
+                existing->module_node_id == binding.module_node_id &&
+                existing->module_port_index == binding.module_port_index)) {
+            return false;
+        }
+    }
+    if (relay_node_port_type_is_item(module_definition->inputs[
+            binding.module_port_index].type)) {
+        for (index = 0; index < world->module_output_binding_count; index++) {
+            const Relay_NodeModuleOutputBinding *existing =
+                &world->module_output_bindings[index];
+
+            if (existing->module_node_id == binding.module_node_id &&
+                existing->source_is_module_input &&
+                existing->source_module_input_port_index ==
+                    binding.module_port_index) {
+                return false;
+            }
+        }
+    }
+    if (!relay_node_world_grow_bindings(
             (void **)&world->module_input_bindings,
             &world->module_input_binding_capacity,
             world->module_input_binding_count,
@@ -484,6 +743,7 @@ bool relay_node_world_bind_module_output(Relay_NodeWorld *world,
     const Relay_Node *module;
     const Relay_NodeDefinition *module_definition;
     Relay_NodePortType source_type;
+    size_t index;
 
     if (world == NULL) {
         return false;
@@ -510,6 +770,7 @@ bool relay_node_world_bind_module_output(Relay_NodeWorld *world,
             relay_node_definition_for(source);
 
         if (source_definition == NULL ||
+            source->module_instance_id != module->id ||
             binding.source_port_index >= source_definition->output_count) {
             return false;
         }
@@ -517,8 +778,69 @@ bool relay_node_world_bind_module_output(Relay_NodeWorld *world,
             binding.source_port_index].type;
     }
     if (!relay_node_port_types_compatible(source_type,
-            module_definition->outputs[binding.module_port_index].type) ||
-        !relay_node_world_grow_bindings(
+            module_definition->outputs[binding.module_port_index].type)) {
+        return false;
+    }
+    for (index = 0; index < world->module_output_binding_count; index++) {
+        const Relay_NodeModuleOutputBinding *existing =
+            &world->module_output_bindings[index];
+
+        if (existing->module_node_id == binding.module_node_id &&
+            existing->module_port_index == binding.module_port_index) {
+            return false;
+        }
+    }
+    if (relay_node_port_type_is_item(source_type)) {
+        if (binding.source_is_module_input) {
+            for (index = 0; index < world->module_input_binding_count;
+                    index++) {
+                const Relay_NodeModuleInputBinding *existing =
+                    &world->module_input_bindings[index];
+
+                if (existing->module_node_id == binding.module_node_id &&
+                    existing->module_port_index ==
+                        binding.source_module_input_port_index) {
+                    return false;
+                }
+            }
+            for (index = 0; index < world->module_output_binding_count;
+                    index++) {
+                const Relay_NodeModuleOutputBinding *existing =
+                    &world->module_output_bindings[index];
+
+                if (existing->module_node_id == binding.module_node_id &&
+                    existing->source_is_module_input &&
+                    existing->source_module_input_port_index ==
+                        binding.source_module_input_port_index) {
+                    return false;
+                }
+            }
+        } else {
+            for (index = 0; index < world->connection_count; index++) {
+                const Relay_NodeConnection *connection =
+                    &world->connections[index];
+
+                if (connection->source_node_id == binding.source_node_id &&
+                    connection->source_port_index ==
+                        binding.source_port_index) {
+                    return false;
+                }
+            }
+            for (index = 0; index < world->module_output_binding_count;
+                    index++) {
+                const Relay_NodeModuleOutputBinding *existing =
+                    &world->module_output_bindings[index];
+
+                if (!existing->source_is_module_input &&
+                    existing->source_node_id == binding.source_node_id &&
+                    existing->source_port_index ==
+                        binding.source_port_index) {
+                    return false;
+                }
+            }
+        }
+    }
+    if (!relay_node_world_grow_bindings(
             (void **)&world->module_output_bindings,
             &world->module_output_binding_capacity,
             world->module_output_binding_count,

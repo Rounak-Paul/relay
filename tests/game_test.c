@@ -3,6 +3,137 @@
 
 #include <string.h>
 
+/** Verify bounded FIFO ordering, backpressure, identity, and material fan-out. */
+static bool relay_test_physical_item_queues(void)
+{
+    static const Relay_NodePortDefinition source_outputs[] = {
+        {"coal", "Coal", RELAY_NODE_PORT_TYPE_COAL}
+    };
+    static const Relay_NodePortDefinition destination_inputs[] = {
+        {"coal", "Coal", RELAY_NODE_PORT_TYPE_COAL}
+    };
+    const Relay_NodePropertyDefinition *properties;
+    Relay_NodeDefinition source_definition = {
+        .id = 9001,
+        .key = "test.source",
+        .display_name = "Test Source",
+        .glyph = "S",
+        .description = "Queue test source.",
+        .category = RELAY_NODE_CATEGORY_SOURCE,
+        .outputs = source_outputs,
+        .output_count = 1,
+        .simulation = {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+    };
+    Relay_NodeDefinition destination_definition = {
+        .id = 9002,
+        .key = "test.destination",
+        .display_name = "Test Destination",
+        .glyph = "D",
+        .description = "Queue test destination.",
+        .category = RELAY_NODE_CATEGORY_PROCESSOR,
+        .inputs = destination_inputs,
+        .input_count = 1,
+        .simulation = {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+    };
+    Relay_NodeWorld world = {0};
+    Relay_ItemQueue source_queue = {0};
+    Relay_ItemQueue destination_queue = {0};
+    Relay_Item item;
+    Relay_Item extra;
+    Relay_NodeId source_id;
+    Relay_NodeId destination_a;
+    Relay_NodeId destination_b;
+    size_t property_count;
+    size_t index;
+    bool valid = false;
+
+    properties = relay_node_universal_properties(&property_count);
+    source_definition.properties = properties;
+    source_definition.property_count = property_count;
+    destination_definition.properties = properties;
+    destination_definition.property_count = property_count;
+    if (!relay_node_world_init(&world)) {
+        return false;
+    }
+    source_id = relay_node_world_create_definition(&world,
+        &source_definition, 0, 0);
+    destination_a = relay_node_world_create_definition(&world,
+        &destination_definition, 10, 0);
+    destination_b = relay_node_world_create_definition(&world,
+        &destination_definition, 20, 0);
+    if (source_id == 0 || destination_a == 0 || destination_b == 0 ||
+        !relay_node_world_connect(&world, source_id, 0, destination_a, 0) ||
+        relay_node_world_connect(&world, source_id, 0, destination_b, 0)) {
+        goto cleanup;
+    }
+    for (index = 1; index <= RELAY_ITEM_QUEUE_CAPACITY; index++) {
+        if (!relay_node_world_item_create(&world, RELAY_NODE_PORT_TYPE_COAL,
+                &item) ||
+            item.id != index || !relay_item_queue_push(&source_queue, item)) {
+            goto cleanup;
+        }
+    }
+    if (!relay_item_queue_full(&source_queue) ||
+        !relay_node_world_item_create(&world, RELAY_NODE_PORT_TYPE_COAL,
+            &extra) ||
+        relay_item_queue_push(&source_queue, extra)) {
+        goto cleanup;
+    }
+    for (index = 1; index <= RELAY_ITEM_QUEUE_CAPACITY / 2; index++) {
+        if (!relay_item_queue_pop(&source_queue, &item) || item.id != index) {
+            goto cleanup;
+        }
+    }
+    for (index = 0; index < RELAY_ITEM_QUEUE_CAPACITY / 2; index++) {
+        if (!relay_node_world_item_create(&world, RELAY_NODE_PORT_TYPE_COAL,
+                &item) ||
+            !relay_item_queue_push(&source_queue, item)) {
+            goto cleanup;
+        }
+    }
+    while (!relay_item_queue_empty(&source_queue)) {
+        if (!relay_item_queue_transfer(&source_queue, &destination_queue,
+                RELAY_NODE_PORT_TYPE_COAL)) {
+            goto cleanup;
+        }
+    }
+    if (!relay_item_queue_full(&destination_queue) ||
+        !relay_item_queue_push(&source_queue, extra) ||
+        relay_item_queue_transfer(&source_queue, &destination_queue,
+            RELAY_NODE_PORT_TYPE_COAL) ||
+        source_queue.count != 1 ||
+        !relay_item_queue_pop(&source_queue, &item) || item.id != extra.id ||
+        relay_item_queue_transfer(&destination_queue, &source_queue,
+            RELAY_NODE_PORT_TYPE_IRON_ORE)) {
+        goto cleanup;
+    }
+    for (index = RELAY_ITEM_QUEUE_CAPACITY / 2 + 1;
+            index <= RELAY_ITEM_QUEUE_CAPACITY; index++) {
+        if (!relay_item_queue_pop(&destination_queue, &item) ||
+            item.id != index) {
+            goto cleanup;
+        }
+    }
+    if (!relay_item_queue_pop(&destination_queue, &item) ||
+        item.id != extra.id + 1) {
+        goto cleanup;
+    }
+    world.nodes[0].output_queues[0] = destination_queue;
+    if (!relay_node_world_items_valid(&world) ||
+        !relay_item_queue_peek(&destination_queue, &item) ||
+        !relay_item_queue_push(&world.nodes[1].input_queues[0], item) ||
+        relay_node_world_items_valid(&world) ||
+        !relay_item_queue_pop(&world.nodes[1].input_queues[0], &item) ||
+        !relay_node_world_items_valid(&world)) {
+        goto cleanup;
+    }
+    valid = true;
+
+cleanup:
+    relay_node_world_shutdown(&world);
+    return valid;
+}
+
 /** Verify one fixed-rate source definition and its universal script contract. */
 static bool relay_test_source_definition(Relay_NodeDefinitionId id,
     const char *key, Relay_NodePortType output_type)
@@ -76,6 +207,9 @@ int relay_game_test(void)
     Relay_NodeId timer_id;
     size_t index;
 
+    if (!relay_test_physical_item_queues()) {
+        return 1;
+    }
     timer_definition = relay_node_definition_find(RELAY_NODE_DEFINITION_TIMER);
     trigger_port_visual = relay_node_renderer_port_visual(
         RELAY_NODE_PORT_TYPE_TRIGGER);
@@ -175,20 +309,26 @@ int relay_game_test(void)
         const Relay_Node *source = relay_node_world_find_const(&game.nodes,
             source_node_ids[index]);
 
+        Relay_Item item;
+
         if (source == NULL || source->produced != 1 ||
-            source->progress != 0 || source->output_values[0] != 1) {
+            source->progress != 0 || source->output_values[0] != 0 ||
+            source->output_queues[0].count != 1 ||
+            !relay_item_queue_peek(&source->output_queues[0], &item) ||
+            item.type != miner_types[index] || item.id == 0) {
             relay_game_shutdown(&game);
             relay_script_runtime_shutdown(&scripts);
             return 1;
         }
     }
     if (miner->produced != 1 || miner->progress != 0 ||
-        miner->output_values[0] != 1 ||
+        miner->output_queues[0].count != 1 ||
+        !relay_node_world_items_valid(&game.nodes) ||
         game.simulation_step != RELAY_SOURCE_MINER_INTERVAL_STEPS + 1 ||
         !relay_node_property_get(timer, "timer.triggers", &value,
             &value_type) || value.integer != 1 ||
         relay_game_connect_nodes(&game, miner->id, 0, timer->id, 0) ||
-        !relay_game_step(&game) || miner->output_values[0] != 0 ||
+        !relay_game_step(&game) || miner->output_queues[0].count != 1 ||
         miner->progress != 1) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
@@ -216,6 +356,21 @@ int relay_game_test(void)
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
+    }
+    {
+        const size_t queue_count = miner->output_queues[0].count;
+        const int64_t produced = miner->produced;
+
+        miner->progress = RELAY_SOURCE_MINER_INTERVAL_STEPS - 1;
+        game.nodes.next_item_id = UINT64_MAX;
+        if (relay_game_step(&game) ||
+            miner->output_queues[0].count != queue_count ||
+            miner->produced != produced ||
+            game.nodes.next_item_id != UINT64_MAX) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
     }
     relay_game_shutdown(&game);
     relay_script_runtime_shutdown(&scripts);

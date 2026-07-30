@@ -2,6 +2,8 @@
 
 #include "relay/asset.h"
 
+#include <stdio.h>
+
 #if RELAY_PLATFORM_WINDOWS
 #include <windows.h>
 #else
@@ -59,11 +61,142 @@ static Relay_GameInput relay_app_game_input(const Relay_TerminalEvent *event)
 /** Apply Escape as a universal back action before offering application exit. */
 static void relay_app_back(Relay_App *app)
 {
+    if (app->overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU) {
+        return;
+    }
+    if (app->overlay == RELAY_TERMINAL_OVERLAY_SLOT_SELECT) {
+        app->overlay = RELAY_TERMINAL_OVERLAY_SESSION_MENU;
+        return;
+    }
+    if (app->overlay == RELAY_TERMINAL_OVERLAY_SAVE_SELECT ||
+        app->overlay == RELAY_TERMINAL_OVERLAY_SAVE_FAILED) {
+        app->overlay = app->exit_after_save ?
+            RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM :
+            RELAY_TERMINAL_OVERLAY_NONE;
+        app->exit_after_save = false;
+        app->game.session_exit_after_save = false;
+        return;
+    }
     if (app->overlay != RELAY_TERMINAL_OVERLAY_NONE) {
         app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
     } else if (!relay_game_back(&app->game)) {
         app->overlay = RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM;
     }
+}
+
+/** Save the current session at a main-thread simulation boundary. */
+static bool relay_app_save(Relay_App *app, Relay_SessionSaveMode mode)
+{
+    return relay_session_save(&app->sessions, &app->game, &app->scripts,
+        &app->logger, mode);
+}
+
+/** Apply one key event to the startup session menu. */
+static void relay_app_handle_session_menu(Relay_App *app,
+    const Relay_TerminalEvent *event)
+{
+    if (event->key == RELAY_TERMINAL_KEY_UP ||
+        event->character == 'k') {
+        app->game.session_menu_selection =
+            app->game.session_menu_selection == 0 ? 2 :
+                app->game.session_menu_selection - 1;
+        return;
+    }
+    if (event->key == RELAY_TERMINAL_KEY_DOWN ||
+        event->character == 'j') {
+        app->game.session_menu_selection =
+            (app->game.session_menu_selection + 1) % 3;
+        return;
+    }
+    if (event->key != RELAY_TERMINAL_KEY_CONFIRM) {
+        return;
+    }
+    if (app->game.session_menu_selection == 0) {
+        if (relay_session_load_last(&app->sessions, &app->game, &app->scripts,
+                &app->logger)) {
+            app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
+            app->simulation_accumulator = 0.0;
+        }
+        return;
+    }
+    if (app->game.session_menu_selection == 1) {
+        app->sessions.selected_slot = 0;
+        app->overlay = RELAY_TERMINAL_OVERLAY_SLOT_SELECT;
+        return;
+    }
+    relay_session_begin_new(&app->sessions, &app->game);
+    app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
+    app->simulation_accumulator = 0.0;
+}
+
+/** Apply one key event to the saved-slot browser. */
+static void relay_app_handle_slot_select(Relay_App *app,
+    const Relay_TerminalEvent *event)
+{
+    if (event->key == RELAY_TERMINAL_KEY_ESCAPE) {
+        relay_app_back(app);
+    } else if ((event->key == RELAY_TERMINAL_KEY_UP ||
+            event->character == 'k') && app->sessions.slot_count > 0) {
+        app->sessions.selected_slot =
+            app->sessions.selected_slot == 0 ?
+                app->sessions.slot_count - 1 :
+                app->sessions.selected_slot - 1;
+    } else if ((event->key == RELAY_TERMINAL_KEY_DOWN ||
+            event->character == 'j') && app->sessions.slot_count > 0) {
+        app->sessions.selected_slot =
+            (app->sessions.selected_slot + 1) % app->sessions.slot_count;
+    } else if (event->key == RELAY_TERMINAL_KEY_CONFIRM &&
+        app->sessions.selected_slot < app->sessions.slot_count &&
+        relay_session_load_slot(&app->sessions,
+            app->sessions.slots[app->sessions.selected_slot].id,
+            &app->game, &app->scripts, &app->logger)) {
+        app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
+        app->simulation_accumulator = 0.0;
+    }
+}
+
+/** Apply one key event to overwrite versus save-as-new selection. */
+static void relay_app_handle_save_select(Relay_App *app,
+    const Relay_TerminalEvent *event)
+{
+    const bool can_overwrite = app->sessions.active_session_id != 0;
+    const bool can_create =
+        app->sessions.slot_count < RELAY_SESSION_SLOT_CAPACITY;
+
+    if (event->key == RELAY_TERMINAL_KEY_ESCAPE) {
+        relay_app_back(app);
+        return;
+    }
+    if (event->key == RELAY_TERMINAL_KEY_UP ||
+        event->key == RELAY_TERMINAL_KEY_DOWN ||
+        event->character == 'j' || event->character == 'k') {
+        if (can_overwrite && can_create) {
+            app->game.session_save_new_selected =
+                !app->game.session_save_new_selected;
+        } else if (can_create) {
+            app->game.session_save_new_selected = true;
+        } else {
+            app->game.session_save_new_selected = false;
+        }
+        return;
+    }
+    if (event->key != RELAY_TERMINAL_KEY_CONFIRM) {
+        return;
+    }
+    if ((!can_overwrite && !app->game.session_save_new_selected) ||
+        (!can_create && app->game.session_save_new_selected)) {
+        return;
+    }
+    app->pending_save_mode = app->game.session_save_new_selected ?
+        RELAY_SESSION_SAVE_NEW_SLOT : RELAY_SESSION_SAVE_OVERWRITE;
+    if (relay_app_save(app, app->pending_save_mode)) {
+        app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
+        if (app->exit_after_save) {
+            app->should_exit = true;
+        }
+        return;
+    }
+    app->overlay = RELAY_TERMINAL_OVERLAY_SAVE_FAILED;
 }
 
 /** Apply one normalized terminal event to the modal Blueprint source editor. */
@@ -193,12 +326,13 @@ static void relay_app_on_event(const Relay_Event *event, void *context)
         return;
     }
     if (event->type == RELAY_EVENT_QUIT_REQUESTED) {
-        app->should_exit = true;
+        app->overlay = RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM;
     } else if (event->type == RELAY_EVENT_TERMINAL_RESIZED) {
         relay_logger_log(&app->logger, RELAY_LOG_LEVEL_DEBUG,
             "Terminal resized at simulation step %llu.",
             (unsigned long long)app->game.simulation_step);
-        if (!relay_terminal_draw(&app->terminal, &app->game, app->overlay)) {
+        if (!relay_terminal_draw(&app->terminal, &app->game, &app->sessions,
+                app->overlay)) {
             relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                 "Terminal redraw failed.");
             app->state = RELAY_APP_STATE_FAILED;
@@ -243,6 +377,24 @@ bool relay_app_init(Relay_App *app)
         app->state = RELAY_APP_STATE_FAILED;
         return false;
     }
+    if (!relay_session_store_init(&app->sessions, NULL)) {
+        relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
+            "Session storage initialization failed: %s.",
+            app->sessions.status);
+        app->state = RELAY_APP_STATE_FAILED;
+        return false;
+    }
+    app->game.session_continue_available =
+        app->sessions.continue_available;
+    (void)snprintf(app->game.session_status,
+        sizeof(app->game.session_status), "%s", app->sessions.status);
+    app->game.session_menu_selection =
+        app->sessions.continue_available ? 0 : 1;
+    if (app->sessions.slot_count > 0) {
+        app->overlay = RELAY_TERMINAL_OVERLAY_SESSION_MENU;
+    } else {
+        relay_session_begin_new(&app->sessions, &app->game);
+    }
     if (!relay_event_bus_init(&app->events) ||
         relay_event_bus_subscribe(&app->events, RELAY_EVENT_QUIT_REQUESTED,
             relay_app_on_event, app) == 0 ||
@@ -265,7 +417,8 @@ bool relay_app_init(Relay_App *app)
         app->state = RELAY_APP_STATE_FAILED;
         return false;
     }
-    if (!relay_terminal_draw(&app->terminal, &app->game, app->overlay)) {
+    if (!relay_terminal_draw(&app->terminal, &app->game, &app->sessions,
+            app->overlay)) {
         relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
             "Initial terminal rendering failed.");
         app->state = RELAY_APP_STATE_FAILED;
@@ -295,7 +448,8 @@ int relay_app_run(Relay_App *app)
         bool simulation_changed = false;
         bool simulation_caught_up;
 
-        if (!relay_terminal_poll(&app->terminal, &app->game, &event)) {
+        if (!relay_terminal_poll(&app->terminal, &app->game, &app->sessions,
+                app->overlay, &event)) {
             relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                 "Terminal event polling failed.");
             app->state = RELAY_APP_STATE_FAILED;
@@ -308,12 +462,12 @@ int relay_app_run(Relay_App *app)
         if (elapsed < 0.0) {
             elapsed = 0.0;
         }
-        app->simulation_accumulator += elapsed;
-        {
+        if (app->overlay == RELAY_TERMINAL_OVERLAY_NONE) {
             size_t catch_up_steps = 0;
             const double simulation_interval =
                 1.0 / RELAY_GAME_SIMULATION_STEPS_PER_SECOND;
 
+            app->simulation_accumulator += elapsed;
             while (app->simulation_accumulator >= simulation_interval &&
                 catch_up_steps < RELAY_GAME_MAX_CATCH_UP_STEPS) {
                 if (!relay_game_step(&app->game)) {
@@ -328,6 +482,9 @@ int relay_app_run(Relay_App *app)
             }
             simulation_caught_up =
                 app->simulation_accumulator < simulation_interval;
+        } else {
+            app->simulation_accumulator = 0.0;
+            simulation_caught_up = true;
         }
         if (event.type == RELAY_TERMINAL_EVENT_RESIZED ||
             event.type == RELAY_TERMINAL_EVENT_QUIT) {
@@ -342,19 +499,55 @@ int relay_app_run(Relay_App *app)
         } else if (event.type == RELAY_TERMINAL_EVENT_INPUT) {
             Relay_GameActionResult result = RELAY_GAME_ACTION_NONE;
 
-            if (app->game.editing_blueprint_id != 0 &&
+            if (app->overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU) {
+                relay_app_handle_session_menu(app, &event);
+            } else if (app->overlay == RELAY_TERMINAL_OVERLAY_SLOT_SELECT) {
+                relay_app_handle_slot_select(app, &event);
+            } else if (app->overlay == RELAY_TERMINAL_OVERLAY_SAVE_SELECT) {
+                relay_app_handle_save_select(app, &event);
+            } else if (app->overlay == RELAY_TERMINAL_OVERLAY_SAVE_FAILED) {
+                if (event.key == RELAY_TERMINAL_KEY_CONFIRM) {
+                    if (relay_app_save(app, app->pending_save_mode)) {
+                        app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
+                        if (app->exit_after_save) {
+                            app->should_exit = true;
+                            continue;
+                        }
+                    }
+                } else if (event.character == 'x' ||
+                    event.character == 'X') {
+                    if (!app->exit_after_save) {
+                        continue;
+                    }
+                    relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
+                        "Exiting without saving after explicit confirmation.");
+                    app->should_exit = true;
+                    continue;
+                } else if (event.key == RELAY_TERMINAL_KEY_ESCAPE) {
+                    relay_app_back(app);
+                }
+            } else if (app->game.editing_blueprint_id != 0 &&
                 app->overlay == RELAY_TERMINAL_OVERLAY_NONE) {
                 relay_app_handle_editor_input(app, &event);
             } else if (app->overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM) {
                 if (event.key == RELAY_TERMINAL_KEY_CONFIRM) {
-                    app->should_exit = true;
-                    continue;
-                }
-                if (event.key == RELAY_TERMINAL_KEY_ESCAPE) {
+                    app->exit_after_save = true;
+                    app->game.session_exit_after_save = true;
+                    app->game.session_save_new_selected =
+                        app->sessions.active_session_id == 0;
+                    app->overlay = RELAY_TERMINAL_OVERLAY_SAVE_SELECT;
+                } else if (event.key == RELAY_TERMINAL_KEY_ESCAPE) {
                     relay_app_back(app);
                 }
             } else if (event.key == RELAY_TERMINAL_KEY_ESCAPE) {
                 relay_app_back(app);
+            } else if (event.key == RELAY_TERMINAL_KEY_SAVE ||
+                event.character == 's' || event.character == 'S') {
+                app->exit_after_save = false;
+                app->game.session_exit_after_save = false;
+                app->game.session_save_new_selected =
+                    app->sessions.active_session_id == 0;
+                app->overlay = RELAY_TERMINAL_OVERLAY_SAVE_SELECT;
             } else if (event.character == 'n' || event.character == 'N') {
                 if (!relay_game_create_blueprint(&app->game)) {
                     relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
@@ -398,13 +591,15 @@ int relay_app_run(Relay_App *app)
                     RELAY_LOG_LEVEL_INFO : RELAY_LOG_LEVEL_WARNING, "%s.",
                     relay_game_action_result_label(result));
             }
-            if (!relay_terminal_draw(&app->terminal, &app->game, app->overlay)) {
+            if (!relay_terminal_draw(&app->terminal, &app->game,
+                    &app->sessions, app->overlay)) {
                 relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                     "Terminal redraw failed.");
                 app->state = RELAY_APP_STATE_FAILED;
                 return 1;
             }
-        } else if (event.type == RELAY_TERMINAL_EVENT_MOUSE) {
+        } else if (event.type == RELAY_TERMINAL_EVENT_MOUSE &&
+            app->overlay == RELAY_TERMINAL_OVERLAY_NONE) {
             if (event.workspace_tab_index_plus_one != 0) {
                 (void)relay_game_activate_workspace(&app->game,
                     event.workspace_tab_index_plus_one - 1);
@@ -433,7 +628,8 @@ int relay_app_run(Relay_App *app)
                 relay_logger_log(&app->logger, RELAY_LOG_LEVEL_WARNING,
                     "Node drag movement was rejected.");
             }
-            if (!relay_terminal_draw(&app->terminal, &app->game, app->overlay)) {
+            if (!relay_terminal_draw(&app->terminal, &app->game,
+                    &app->sessions, app->overlay)) {
                 relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                     "Terminal viewport redraw failed.");
                 app->state = RELAY_APP_STATE_FAILED;
@@ -441,7 +637,8 @@ int relay_app_run(Relay_App *app)
             }
         } else if (event.type == RELAY_TERMINAL_EVENT_NONE &&
             simulation_changed && simulation_caught_up &&
-            !relay_terminal_draw(&app->terminal, &app->game, app->overlay)) {
+            !relay_terminal_draw(&app->terminal, &app->game, &app->sessions,
+                app->overlay)) {
             relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                 "Simulation frame redraw failed.");
             app->state = RELAY_APP_STATE_FAILED;

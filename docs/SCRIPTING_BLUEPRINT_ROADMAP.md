@@ -65,8 +65,8 @@ Exit criteria:
 
 ## Stage 1 — deterministic Lua artifacts
 
-**Status:** core artifact execution implemented; stable source hashes and
-save/load recompilation remain part of this stage.
+**Status:** core artifact execution and save/load source recompilation
+implemented; stable source hashes remain part of this stage.
 
 Scope:
 
@@ -146,8 +146,8 @@ Exit criteria:
 boundaries, nested component placement, top-level scene switching, Script-panel
 instantiation, the bounded Vim-style modal editor, transactional `:w`/`:wq`
 deployment, diagnostics, semantic highlighting, completion/API signature
-assistance, and universal Back are complete. Rename/parameter actions and
-persistence land in their owning later stages.
+  assistance, universal Back, and game-session persistence are complete.
+  Rename/parameter actions land in their owning later stages.
 
 Scope:
 
@@ -190,6 +190,10 @@ Exit criteria:
 - replay reproduces script commands and state hashes.
 
 ## Stage 6 — blueprint persistence and exchange
+
+**Status:** complete game-session persistence implemented. Portable standalone
+Blueprint import/export, optional chunk preservation, and historical migrations
+remain future exchange work.
 
 Scope:
 

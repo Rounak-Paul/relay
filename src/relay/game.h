@@ -82,6 +82,13 @@ typedef struct Relay_Game {
     size_t active_workspace;
     Relay_BlueprintId editing_blueprint_id;
     uint64_t simulation_step;
+    uint64_t session_id;
+    uint64_t save_revision;
+    char session_status[96];
+    bool session_continue_available;
+    size_t session_menu_selection;
+    bool session_save_new_selected;
+    bool session_exit_after_save;
 } Relay_Game;
 
 /** Initialize the node world and starting currency. */

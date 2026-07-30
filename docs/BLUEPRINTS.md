@@ -9,8 +9,10 @@ component in its own scene. A compiled Blueprint can be placed in Relay or used
 as a component inside another Blueprint.
 
 A placed Blueprint is an ordinary `Relay_NodeWorld` node. Port typing,
-one-source-per-input, output fan-out, previous-step wire latency, and fixed-step
-simulation are identical for built-in nodes, module processes, and nested modules.
+one-source-per-input, fixed-step simulation, and deterministic transport are
+identical for built-in nodes, module processes, and nested modules. Control
+outputs may fan out. Physical-item outputs have one destination because an item
+cannot occupy two queues.
 Compilation recursively flattens the hierarchy into this one graph contract;
 there is no scripting-only wire format or nested simulator.
 
@@ -55,8 +57,9 @@ script_2.trigger_out
 
 Drag may begin from either the input or output port row. The terminal normalizes
 the gesture into an output-to-input connection, and the graph accepts it only
-when both declared port types match. An output may feed several destinations;
-an input has one source, and a new valid wire replaces its previous source.
+when both declared port types match. A control output may feed several
+destinations. A physical-item output has one destination. Every input has one
+source, and a new valid wire replaces its previous source.
 
 `Module Inputs` and `Module Outputs` are architecture boundary nodes, not
 runtime machines. The Lua `on_process` function is the Blueprint's implicit
@@ -131,20 +134,18 @@ The public interface and architecture follow it and are declared before
 -- Relay Blueprint
 -- Ports: input/output with Type.*.
 -- Components: source.*, control.*, or script.*.
--- on_process gets read-only inputs; state persists per instance.
--- Return declared outputs. Save with :w.
+-- on_process(state, inputs, outputs); state persists per instance.
+-- Read inputs and write outputs by port name. Save with :w.
 
 input("trigger", Type.TRIGGER)
 input("enabled", Type.BOOLEAN)
 output("trigger_out", Type.TRIGGER)
 output("count", Type.INTEGER)
 
-function on_process(inputs, state)
+function on_process(state, inputs, outputs)
   state.count = (state.count or 0) + 1
-  return {
-    trigger_out = inputs.enabled and inputs.trigger or 0,
-    count = state.count
-  }
+  outputs.trigger_out = inputs.enabled and inputs.trigger or 0
+  outputs.count = state.count
 end
 ```
 
@@ -165,19 +166,26 @@ Type.INTEGER
 keys must be unique Lua identifiers. A module supports at most eight inputs and
 eight outputs.
 
-`inputs` is an immutable activation snapshot. `on_process` runs once when the
-module is initialized, when a nonzero transient Trigger or material delivery
-arrives, or when a level-valued Boolean or Integer input changes. This
-keeps player programs event-driven; periodic work requires an explicitly wired
-Timer rather than access to the engine's fixed simulation cadence.
+`inputs` and `outputs` are sealed namespaces. Trigger, Boolean, and Integer
+inputs are read-only scalar values. Their outputs are assigned by port name.
+Physical material ports are bounded FIFO queues: `#inputs.coal` reports the
+count, `outputs.coal.capacity` reports capacity, `inputs.coal:pop()` reserves
+the oldest item, and `outputs.coal:push(item)` transfers that same unique item.
+Scripts cannot construct, copy, retain, transform, or destroy physical items.
+
+`on_process` runs once when the module is initialized, when a material input
+queue is nonempty, when a nonzero Trigger arrives, or when a retained Boolean
+or Integer input changes. This keeps player programs event-driven; periodic work
+requires an explicitly wired Timer rather than access to the engine's fixed
+simulation cadence.
 
 `state` is a private persistent table for that placed instance. State keys must
 be short strings and values must be integers, Booleans, or bounded strings; at
-most 64 entries are retained. `on_process` returns a table whose keys match
-declared outputs. Trigger and material outputs last for one simulation step;
-Boolean, integer, and text outputs retain their value between activations.
-Missing output keys emit zero or false when a process runs. A wrong output type
-faults that activation without committing outputs or state.
+most 64 entries are retained. Boolean, Integer, and Text outputs retain their
+value between activations, while Trigger is transient. Material queues retain
+their physical items until downstream capacity accepts them. Wrong output
+types, unresolved `pop()` reservations, duplicate item aliases, stale handles,
+and Lua faults roll back queue operations, scalar outputs, and state together.
 
 Self-connections retain Relay's previous-step feedback semantics, so a module
 cannot recurse through itself inside one simulation step.

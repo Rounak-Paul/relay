@@ -23,6 +23,7 @@ typedef uint64_t Relay_NodeId;
 enum {
     RELAY_NODE_MAX_PORTS = 8,
     RELAY_NODE_LOCAL_KEY_CAPACITY = 32,
+    RELAY_ITEM_QUEUE_CAPACITY = 32,
     RELAY_TIMER_DEFAULT_INTERVAL_STEPS = 60,
     RELAY_SOURCE_MINER_INTERVAL_STEPS = 60
 };
@@ -75,6 +76,22 @@ typedef enum Relay_NodePortType {
     RELAY_NODE_PORT_TYPE_INTEGER,
     RELAY_NODE_PORT_TYPE_TEXT
 } Relay_NodePortType;
+
+/** Stable identity of one unique physical gameplay item. */
+typedef uint64_t Relay_ItemId;
+
+/** One immutable physical item stored in exactly one authoritative queue. */
+typedef struct Relay_Item {
+    Relay_ItemId id;
+    Relay_NodePortType type;
+} Relay_Item;
+
+/** Bounded deterministic FIFO owned by one material port. */
+typedef struct Relay_ItemQueue {
+    Relay_Item items[RELAY_ITEM_QUEUE_CAPACITY];
+    size_t head;
+    size_t count;
+} Relay_ItemQueue;
 
 /** Immutable input or output port declared by a node definition. */
 typedef struct Relay_NodePortDefinition {
@@ -137,6 +154,8 @@ typedef struct Relay_Node {
     int64_t output_values[RELAY_NODE_MAX_PORTS];
     int64_t previous_output_values[RELAY_NODE_MAX_PORTS];
     int64_t process_input_values[RELAY_NODE_MAX_PORTS];
+    Relay_ItemQueue input_queues[RELAY_NODE_MAX_PORTS];
+    Relay_ItemQueue output_queues[RELAY_NODE_MAX_PORTS];
     uint64_t blueprint_id;
     uint64_t origin_blueprint_id;
     Relay_NodeId origin_node_id;
@@ -180,6 +199,7 @@ typedef struct Relay_NodeWorld {
     size_t count;
     size_t capacity;
     Relay_NodeId next_id;
+    Relay_ItemId next_item_id;
     Relay_NodeConnection *connections;
     size_t connection_count;
     size_t connection_capacity;
@@ -269,6 +289,35 @@ bool relay_node_port_types_compatible(Relay_NodePortType source_type,
 
 /** Return whether values of this type represent one-step deliveries or events. */
 bool relay_node_port_type_is_transient(Relay_NodePortType type);
+
+/** Return whether a port type carries unique physical items through a queue. */
+bool relay_node_port_type_is_item(Relay_NodePortType type);
+
+/** Return whether one FIFO has no stored items. */
+bool relay_item_queue_empty(const Relay_ItemQueue *queue);
+
+/** Return whether one FIFO has reached its fixed capacity. */
+bool relay_item_queue_full(const Relay_ItemQueue *queue);
+
+/** Return the oldest item without changing queue ownership. */
+bool relay_item_queue_peek(const Relay_ItemQueue *queue, Relay_Item *item);
+
+/** Append one item to a FIFO when capacity remains. */
+bool relay_item_queue_push(Relay_ItemQueue *queue, Relay_Item item);
+
+/** Remove and return the oldest item from a FIFO. */
+bool relay_item_queue_pop(Relay_ItemQueue *queue, Relay_Item *item);
+
+/** Atomically move the oldest compatible item between two FIFOs. */
+bool relay_item_queue_transfer(Relay_ItemQueue *source,
+    Relay_ItemQueue *destination, Relay_NodePortType expected_type);
+
+/** Allocate one unique physical item identity in a world. */
+bool relay_node_world_item_create(Relay_NodeWorld *world,
+    Relay_NodePortType type, Relay_Item *item);
+
+/** Validate queue bounds, types, unique ownership, and next item identity. */
+bool relay_node_world_items_valid(const Relay_NodeWorld *world);
 
 /** Read a script-visible property from a node instance. */
 bool relay_node_property_get(const Relay_Node *node, const char *key,

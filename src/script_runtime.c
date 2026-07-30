@@ -16,9 +16,13 @@
 enum {
     RELAY_SCRIPT_RUNTIME_HASH_SEED = 0x52454C59U,
     RELAY_SCRIPT_RUNTIME_HOOK_GRANULARITY = 100,
-    RELAY_SCRIPT_STATE_ENTRY_LIMIT = 64,
-    RELAY_SCRIPT_STATE_STRING_LIMIT = 256
+    RELAY_SCRIPT_RESERVATION_LIMIT =
+        RELAY_NODE_MAX_PORTS * RELAY_ITEM_QUEUE_CAPACITY
 };
+
+#define RELAY_SCRIPT_NAMESPACE_METATABLE "relay.namespace"
+#define RELAY_SCRIPT_QUEUE_METATABLE "relay.queue"
+#define RELAY_SCRIPT_ITEM_METATABLE "relay.item"
 
 /** Schema being assembled by input/output declarations during compilation. */
 typedef struct Relay_ScriptCompileContext {
@@ -31,6 +35,47 @@ typedef struct Relay_ScriptPortTypeEntry {
     const char *name;
     Relay_NodePortType type;
 } Relay_ScriptPortTypeEntry;
+
+/** One popped physical item reserved inside an activation transaction. */
+typedef struct Relay_ScriptItemReservation {
+    Relay_Item item;
+    bool moved;
+} Relay_ScriptItemReservation;
+
+/** Complete staged mutation set for one atomic script activation. */
+typedef struct Relay_ScriptTransaction {
+    Relay_ScriptRuntime *runtime;
+    const Relay_ScriptSchema *schema;
+    Relay_ItemQueue input_queues[RELAY_NODE_MAX_PORTS];
+    Relay_ItemQueue output_queues[RELAY_NODE_MAX_PORTS];
+    int64_t input_values[RELAY_NODE_MAX_PORTS];
+    int64_t output_values[RELAY_NODE_MAX_PORTS];
+    Relay_ScriptItemReservation reservations[RELAY_SCRIPT_RESERVATION_LIMIT];
+    size_t reservation_count;
+    uint64_t generation;
+} Relay_ScriptTransaction;
+
+/** Generation-checked Lua view of one input or output namespace. */
+typedef struct Relay_ScriptNamespaceHandle {
+    Relay_ScriptRuntime *runtime;
+    uint64_t generation;
+    bool output;
+} Relay_ScriptNamespaceHandle;
+
+/** Generation-checked Lua view of one material port queue. */
+typedef struct Relay_ScriptQueueHandle {
+    Relay_ScriptRuntime *runtime;
+    uint64_t generation;
+    size_t port_index;
+    bool output;
+} Relay_ScriptQueueHandle;
+
+/** Move-only Lua alias of one transaction-owned item reservation. */
+typedef struct Relay_ScriptItemHandle {
+    Relay_ScriptRuntime *runtime;
+    uint64_t generation;
+    size_t reservation_index;
+} Relay_ScriptItemHandle;
 
 static const Relay_ScriptPortTypeEntry relay_script_port_types[] = {
     {"TRIGGER", RELAY_NODE_PORT_TYPE_TRIGGER},
@@ -183,12 +228,6 @@ static int relay_script_read_only_error(lua_State *state)
 static int relay_script_type_read_only_error(lua_State *state)
 {
     return luaL_error(state, "Type enum is read-only");
-}
-
-/** Reject an attempted write to the immutable tick input snapshot. */
-static int relay_script_input_read_only_error(lua_State *state)
-{
-    return luaL_error(state, "input snapshots are read-only");
 }
 
 /** Reject runtime writes to a compiled module's sealed global environment. */
@@ -544,6 +583,354 @@ static bool relay_script_state_reference_is_valid(lua_State *state,
     return valid;
 }
 
+/** Resolve one live transaction through a generation-checked runtime handle. */
+static Relay_ScriptTransaction *relay_script_transaction_get(
+    Relay_ScriptRuntime *runtime, uint64_t generation)
+{
+    Relay_ScriptTransaction *transaction;
+
+    if (runtime == NULL || runtime->active_transaction == NULL) {
+        return NULL;
+    }
+    transaction = runtime->active_transaction;
+    return transaction->runtime == runtime &&
+        transaction->generation == generation ? transaction : NULL;
+}
+
+/** Find a declared port by stable name in one schema direction. */
+static bool relay_script_port_find(const Relay_ScriptSchema *schema,
+    bool output, const char *key, size_t key_length, size_t *port_index)
+{
+    const Relay_ScriptPort *ports = output ? schema->outputs : schema->inputs;
+    const size_t count = output ? schema->output_count : schema->input_count;
+    size_t index;
+
+    for (index = 0; index < count; index++) {
+        if (strlen(ports[index].key) == key_length &&
+            memcmp(ports[index].key, key, key_length) == 0) {
+            *port_index = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Push one scalar value using its exact declared graph type. */
+static void relay_script_push_scalar(lua_State *state,
+    Relay_NodePortType type, int64_t value)
+{
+    if (type == RELAY_NODE_PORT_TYPE_BOOLEAN) {
+        lua_pushboolean(state, value != 0);
+    } else {
+        lua_pushinteger(state, (lua_Integer)value);
+    }
+}
+
+/** Create one queue proxy bound to an active transaction port. */
+static void relay_script_queue_push_handle(lua_State *state,
+    Relay_ScriptRuntime *runtime, uint64_t generation, size_t port_index,
+    bool output)
+{
+    Relay_ScriptQueueHandle *handle = lua_newuserdatauv(state,
+        sizeof(*handle), 0);
+
+    *handle = (Relay_ScriptQueueHandle){
+        runtime, generation, port_index, output};
+    luaL_setmetatable(state, RELAY_SCRIPT_QUEUE_METATABLE);
+}
+
+/** Read a named scalar or material queue from one sealed port namespace. */
+static int relay_script_namespace_index(lua_State *state)
+{
+    Relay_ScriptNamespaceHandle *handle = luaL_checkudata(state, 1,
+        RELAY_SCRIPT_NAMESPACE_METATABLE);
+    Relay_ScriptTransaction *transaction =
+        relay_script_transaction_get(handle->runtime, handle->generation);
+    size_t key_length;
+    const char *key = luaL_checklstring(state, 2, &key_length);
+    size_t port_index;
+    const Relay_ScriptPort *port;
+
+    if (transaction == NULL) {
+        return luaL_error(state, "port namespace expired");
+    }
+    if (!relay_script_port_find(transaction->schema, handle->output, key,
+            key_length, &port_index)) {
+        lua_pushnil(state);
+        return 1;
+    }
+    port = handle->output ? &transaction->schema->outputs[port_index] :
+        &transaction->schema->inputs[port_index];
+    if (relay_node_port_type_is_item(port->type)) {
+        relay_script_queue_push_handle(state, handle->runtime,
+            handle->generation, port_index, handle->output);
+    } else {
+        relay_script_push_scalar(state, port->type,
+            handle->output ? transaction->output_values[port_index] :
+                transaction->input_values[port_index]);
+    }
+    return 1;
+}
+
+/** Assign one scalar output while rejecting input and item-queue mutation. */
+static int relay_script_namespace_newindex(lua_State *state)
+{
+    Relay_ScriptNamespaceHandle *handle = luaL_checkudata(state, 1,
+        RELAY_SCRIPT_NAMESPACE_METATABLE);
+    Relay_ScriptTransaction *transaction =
+        relay_script_transaction_get(handle->runtime, handle->generation);
+    size_t key_length;
+    const char *key = luaL_checklstring(state, 2, &key_length);
+    size_t port_index;
+    Relay_NodePortType type;
+
+    if (transaction == NULL) {
+        return luaL_error(state, "port namespace expired");
+    }
+    if (!handle->output) {
+        return luaL_error(state, "input ports are read-only");
+    }
+    if (!relay_script_port_find(transaction->schema, true, key, key_length,
+            &port_index)) {
+        return luaL_error(state, "unknown output port '%s'", key);
+    }
+    type = transaction->schema->outputs[port_index].type;
+    if (relay_node_port_type_is_item(type)) {
+        return luaL_error(state,
+            "item output '%s' is a queue; use queue:push(item)", key);
+    }
+    if (type == RELAY_NODE_PORT_TYPE_BOOLEAN) {
+        if (!lua_isboolean(state, 3)) {
+            return luaL_error(state, "output '%s' requires a Boolean", key);
+        }
+        transaction->output_values[port_index] =
+            lua_toboolean(state, 3) ? 1 : 0;
+    } else {
+        if (!lua_isinteger(state, 3)) {
+            return luaL_error(state, "output '%s' requires an Integer", key);
+        }
+        transaction->output_values[port_index] =
+            (int64_t)lua_tointeger(state, 3);
+    }
+    return 0;
+}
+
+/** Return one live queue and its declared material type. */
+static Relay_ItemQueue *relay_script_queue_get(lua_State *state,
+    Relay_ScriptQueueHandle **handle_out, Relay_NodePortType *type_out)
+{
+    Relay_ScriptQueueHandle *handle = luaL_checkudata(state, 1,
+        RELAY_SCRIPT_QUEUE_METATABLE);
+    Relay_ScriptTransaction *transaction =
+        relay_script_transaction_get(handle->runtime, handle->generation);
+    const Relay_ScriptPort *port;
+
+    if (transaction == NULL) {
+        (void)luaL_error(state, "item queue expired");
+        return NULL;
+    }
+    if ((handle->output &&
+            handle->port_index >= transaction->schema->output_count) ||
+        (!handle->output &&
+            handle->port_index >= transaction->schema->input_count)) {
+        (void)luaL_error(state, "item queue port is invalid");
+        return NULL;
+    }
+    port = handle->output ?
+        &transaction->schema->outputs[handle->port_index] :
+        &transaction->schema->inputs[handle->port_index];
+    if (!relay_node_port_type_is_item(port->type)) {
+        (void)luaL_error(state, "port is not an item queue");
+        return NULL;
+    }
+    *handle_out = handle;
+    *type_out = port->type;
+    return handle->output ?
+        &transaction->output_queues[handle->port_index] :
+        &transaction->input_queues[handle->port_index];
+}
+
+/** Return the current bounded FIFO item count through Lua's length operator. */
+static int relay_script_queue_length(lua_State *state)
+{
+    Relay_ScriptQueueHandle *handle = NULL;
+    Relay_NodePortType type;
+    Relay_ItemQueue *queue = relay_script_queue_get(state, &handle, &type);
+
+    if (queue == NULL) {
+        return luaL_error(state, "item queue is unavailable");
+    }
+    (void)handle;
+    (void)type;
+    lua_pushinteger(state, (lua_Integer)queue->count);
+    return 1;
+}
+
+/** Resolve queue properties and direction-appropriate methods. */
+static int relay_script_queue_index(lua_State *state)
+{
+    Relay_ScriptQueueHandle *handle = NULL;
+    Relay_NodePortType type;
+    Relay_ItemQueue *queue = relay_script_queue_get(state, &handle, &type);
+    const char *key = luaL_checkstring(state, 2);
+
+    if (queue == NULL || handle == NULL) {
+        return luaL_error(state, "item queue is unavailable");
+    }
+    (void)queue;
+    (void)type;
+    if (strcmp(key, "capacity") == 0) {
+        lua_pushinteger(state, RELAY_ITEM_QUEUE_CAPACITY);
+        return 1;
+    }
+    if (!handle->output && strcmp(key, "pop") == 0) {
+        lua_getfield(state, LUA_REGISTRYINDEX, "relay.queue.pop");
+        return 1;
+    }
+    if (handle->output && strcmp(key, "push") == 0) {
+        lua_getfield(state, LUA_REGISTRYINDEX, "relay.queue.push");
+        return 1;
+    }
+    lua_pushnil(state);
+    return 1;
+}
+
+/** Reserve the oldest input item and return one move-only Lua alias. */
+static int relay_script_queue_pop(lua_State *state)
+{
+    Relay_ScriptQueueHandle *handle = NULL;
+    Relay_NodePortType type;
+    Relay_ItemQueue *queue = relay_script_queue_get(state, &handle, &type);
+    Relay_ScriptTransaction *transaction;
+    Relay_ScriptItemHandle *item_handle;
+    Relay_Item item;
+    size_t reservation_index;
+
+    if (queue == NULL || handle == NULL) {
+        return luaL_error(state, "item queue is unavailable");
+    }
+    transaction =
+        relay_script_transaction_get(handle->runtime, handle->generation);
+    if (transaction == NULL) {
+        return luaL_error(state, "item queue expired");
+    }
+    (void)type;
+    if (handle->output) {
+        return luaL_error(state, "cannot pop from an output queue");
+    }
+    if (relay_item_queue_empty(queue)) {
+        lua_pushnil(state);
+        return 1;
+    }
+    if (transaction->reservation_count >= RELAY_SCRIPT_RESERVATION_LIMIT ||
+        !relay_item_queue_pop(queue, &item)) {
+        return luaL_error(state, "item reservation limit reached");
+    }
+    reservation_index = transaction->reservation_count++;
+    transaction->reservations[reservation_index] =
+        (Relay_ScriptItemReservation){item, false};
+    item_handle = lua_newuserdatauv(state, sizeof(*item_handle), 0);
+    *item_handle = (Relay_ScriptItemHandle){
+        handle->runtime, handle->generation, reservation_index};
+    luaL_setmetatable(state, RELAY_SCRIPT_ITEM_METATABLE);
+    return 1;
+}
+
+/** Consume one reservation into a compatible output queue exactly once. */
+static int relay_script_queue_push(lua_State *state)
+{
+    Relay_ScriptQueueHandle *queue_handle = NULL;
+    Relay_NodePortType type;
+    Relay_ItemQueue *queue = relay_script_queue_get(state, &queue_handle,
+        &type);
+    Relay_ScriptItemHandle *item_handle = luaL_checkudata(state, 2,
+        RELAY_SCRIPT_ITEM_METATABLE);
+    Relay_ScriptTransaction *transaction;
+    Relay_ScriptItemReservation *reservation;
+
+    if (queue == NULL || queue_handle == NULL) {
+        return luaL_error(state, "item queue is unavailable");
+    }
+    transaction = relay_script_transaction_get(queue_handle->runtime,
+        queue_handle->generation);
+    if (!queue_handle->output) {
+        return luaL_error(state, "cannot push into an input queue");
+    }
+    if (item_handle->runtime != queue_handle->runtime ||
+        item_handle->generation != queue_handle->generation ||
+        transaction == NULL ||
+        item_handle->reservation_index >= transaction->reservation_count) {
+        return luaL_error(state, "item handle expired");
+    }
+    reservation =
+        &transaction->reservations[item_handle->reservation_index];
+    if (reservation->moved) {
+        return luaL_error(state, "item was already moved");
+    }
+    if (reservation->item.type != type) {
+        return luaL_error(state, "item type does not match output queue");
+    }
+    if (!relay_item_queue_push(queue, reservation->item)) {
+        return luaL_error(state, "output queue is full");
+    }
+    reservation->moved = true;
+    lua_pushboolean(state, true);
+    return 1;
+}
+
+/** Reject arbitrary writes to queue proxy userdata. */
+static int relay_script_queue_newindex(lua_State *state)
+{
+    (void)state;
+    return luaL_error(state, "item queues are controlled by pop and push");
+}
+
+/** Install sealed namespace, queue, and item capability metatables. */
+static bool relay_script_runtime_register_capabilities(lua_State *state)
+{
+    if (luaL_newmetatable(state, RELAY_SCRIPT_NAMESPACE_METATABLE)) {
+        lua_pushcfunction(state, relay_script_namespace_index);
+        lua_setfield(state, -2, "__index");
+        lua_pushcfunction(state, relay_script_namespace_newindex);
+        lua_setfield(state, -2, "__newindex");
+        lua_pushliteral(state, "Relay port namespace");
+        lua_setfield(state, -2, "__metatable");
+    }
+    lua_pop(state, 1);
+    if (luaL_newmetatable(state, RELAY_SCRIPT_QUEUE_METATABLE)) {
+        lua_pushcfunction(state, relay_script_queue_index);
+        lua_setfield(state, -2, "__index");
+        lua_pushcfunction(state, relay_script_queue_newindex);
+        lua_setfield(state, -2, "__newindex");
+        lua_pushcfunction(state, relay_script_queue_length);
+        lua_setfield(state, -2, "__len");
+        lua_pushliteral(state, "Relay item queue");
+        lua_setfield(state, -2, "__metatable");
+    }
+    lua_pop(state, 1);
+    if (luaL_newmetatable(state, RELAY_SCRIPT_ITEM_METATABLE)) {
+        lua_pushliteral(state, "Relay physical item");
+        lua_setfield(state, -2, "__metatable");
+    }
+    lua_pop(state, 1);
+    lua_pushcfunction(state, relay_script_queue_pop);
+    lua_setfield(state, LUA_REGISTRYINDEX, "relay.queue.pop");
+    lua_pushcfunction(state, relay_script_queue_push);
+    lua_setfield(state, LUA_REGISTRYINDEX, "relay.queue.push");
+    return true;
+}
+
+/** Push one sealed input or output namespace for an activation. */
+static void relay_script_namespace_push(lua_State *state,
+    Relay_ScriptRuntime *runtime, uint64_t generation, bool output)
+{
+    Relay_ScriptNamespaceHandle *handle = lua_newuserdatauv(state,
+        sizeof(*handle), 0);
+
+    *handle = (Relay_ScriptNamespaceHandle){runtime, generation, output};
+    luaL_setmetatable(state, RELAY_SCRIPT_NAMESPACE_METATABLE);
+}
+
 /** Validate Relay's deterministic integer-only Lua source subset. */
 static bool relay_script_source_is_valid(const char *source, size_t size,
     Relay_ScriptDiagnostic *diagnostic)
@@ -648,7 +1035,9 @@ bool relay_script_runtime_init(Relay_ScriptRuntime *runtime,
         return false;
     }
     runtime->state = state;
-    if (!relay_script_runtime_open_sandbox(state)) {
+    runtime->next_activation_generation = 1;
+    if (!relay_script_runtime_open_sandbox(state) ||
+        !relay_script_runtime_register_capabilities(state)) {
         relay_script_runtime_shutdown(runtime);
         return false;
     }
@@ -719,7 +1108,7 @@ bool relay_script_runtime_compile(Relay_ScriptRuntime *runtime,
     lua_getfield(state, environment_index, "on_process");
     if (!lua_isfunction(state, -1)) {
         relay_script_diagnostic_set(diagnostic,
-            "Module must define function on_process(inputs, state).");
+            "Module must define function on_process(state, inputs, outputs).");
         lua_settop(state, stack_base);
         return false;
     }
@@ -738,120 +1127,122 @@ bool relay_script_runtime_compile(Relay_ScriptRuntime *runtime,
 
 bool relay_script_runtime_invoke(Relay_ScriptRuntime *runtime,
     const Relay_ScriptArtifact *artifact, Relay_ScriptInstanceState *instance,
-    const Relay_ScriptSchema *schema, const int64_t *input_values,
-    int64_t *output_values, Relay_ScriptDiagnostic *diagnostic)
+    const Relay_ScriptSchema *schema, Relay_ScriptInvocation invocation,
+    Relay_ScriptDiagnostic *diagnostic)
 {
-    int64_t candidate_outputs[RELAY_NODE_MAX_PORTS] = {0};
+    Relay_ScriptTransaction transaction = {0};
     lua_State *state;
     int stack_base;
     int state_reference = LUA_NOREF;
     size_t index;
+    bool success = false;
 
     if (diagnostic != NULL) {
         *diagnostic = (Relay_ScriptDiagnostic){0};
     }
     if (runtime == NULL || runtime->state == NULL || artifact == NULL ||
         !artifact->installed || instance == NULL || schema == NULL ||
-        output_values == NULL ||
-        (schema->input_count > 0 && input_values == NULL)) {
+        invocation.input_queues == NULL || invocation.output_queues == NULL ||
+        invocation.input_values == NULL || invocation.output_values == NULL ||
+        runtime->active_transaction != NULL) {
         relay_script_diagnostic_set(diagnostic,
             "Invalid script invocation request.");
         return false;
     }
     state = runtime->state;
     stack_base = lua_gettop(state);
-    if (!instance->initialized) {
+    if (instance->initialized) {
+        if (!relay_script_state_clone(state, instance->runtime_reference,
+                &state_reference)) {
+            relay_script_diagnostic_set(diagnostic,
+                "Persistent state is invalid.");
+            lua_settop(state, stack_base);
+            return false;
+        }
+    } else {
         lua_newtable(state);
-        instance->runtime_reference = luaL_ref(state, LUA_REGISTRYINDEX);
-        instance->initialized = true;
+        state_reference = luaL_ref(state, LUA_REGISTRYINDEX);
     }
+    transaction.runtime = runtime;
+    transaction.schema = schema;
+    transaction.generation = runtime->next_activation_generation++;
+    if (transaction.generation == 0 ||
+        runtime->next_activation_generation == 0) {
+        runtime->next_activation_generation = 1;
+        relay_script_diagnostic_set(diagnostic,
+            "Script activation identity exhausted.");
+        luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
+        lua_settop(state, stack_base);
+        return false;
+    }
+    (void)memcpy(transaction.input_queues, invocation.input_queues,
+        sizeof(transaction.input_queues));
+    (void)memcpy(transaction.output_queues, invocation.output_queues,
+        sizeof(transaction.output_queues));
+    (void)memcpy(transaction.input_values, invocation.input_values,
+        sizeof(transaction.input_values));
+    (void)memcpy(transaction.output_values, invocation.output_values,
+        sizeof(transaction.output_values));
     lua_rawgeti(state, LUA_REGISTRYINDEX, artifact->on_process_reference);
     if (!lua_isfunction(state, -1)) {
         relay_script_diagnostic_set(diagnostic,
             "Installed on_process function is unavailable.");
+        luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
         lua_settop(state, stack_base);
         return false;
     }
-    lua_createtable(state, 0, (int)schema->input_count);
-    for (index = 0; index < schema->input_count; index++) {
-        if (schema->inputs[index].type == RELAY_NODE_PORT_TYPE_BOOLEAN) {
-            lua_pushboolean(state, input_values[index] != 0);
-        } else {
-            lua_pushinteger(state, (lua_Integer)input_values[index]);
-        }
-        lua_setfield(state, -2, schema->inputs[index].key);
-    }
-    lua_newtable(state);
-    lua_newtable(state);
-    lua_pushvalue(state, -3);
-    lua_setfield(state, -2, "__index");
-    lua_pushcfunction(state, relay_script_input_read_only_error);
-    lua_setfield(state, -2, "__newindex");
-    lua_pushliteral(state, "Relay input snapshot");
-    lua_setfield(state, -2, "__metatable");
-    (void)lua_setmetatable(state, -2);
-    lua_remove(state, -2);
-    if (!relay_script_state_clone(state, instance->runtime_reference,
-            &state_reference)) {
-        relay_script_diagnostic_set(diagnostic,
-            "Persistent state is invalid.");
-        lua_settop(state, stack_base);
-        return false;
-    }
-    if (relay_script_runtime_pcall(runtime, state, 2, 1) != LUA_OK) {
+    lua_rawgeti(state, LUA_REGISTRYINDEX, state_reference);
+    relay_script_namespace_push(state, runtime, transaction.generation, false);
+    relay_script_namespace_push(state, runtime, transaction.generation, true);
+    runtime->active_transaction = &transaction;
+    if (relay_script_runtime_pcall(runtime, state, 3, 1) != LUA_OK) {
+        runtime->active_transaction = NULL;
         relay_script_diagnostic_set(diagnostic, lua_tostring(state, -1));
         luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
         lua_settop(state, stack_base);
         return false;
     }
-    if (!lua_isnil(state, -1) && !lua_istable(state, -1)) {
+    runtime->active_transaction = NULL;
+    if (!lua_isnil(state, -1)) {
         relay_script_diagnostic_set(diagnostic,
-            "on_process must return an output table or nil.");
-        luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
-        lua_settop(state, stack_base);
-        return false;
-    }
-    if (lua_istable(state, -1)) {
-        for (index = 0; index < schema->output_count; index++) {
-            lua_getfield(state, -1, schema->outputs[index].key);
-            if (lua_isnil(state, -1)) {
-                candidate_outputs[index] = 0;
-            } else if (schema->outputs[index].type ==
-                    RELAY_NODE_PORT_TYPE_BOOLEAN && lua_isboolean(state, -1)) {
-                candidate_outputs[index] = lua_toboolean(state, -1) ? 1 : 0;
-            } else if (schema->outputs[index].type !=
-                    RELAY_NODE_PORT_TYPE_BOOLEAN && lua_isinteger(state, -1)) {
-                candidate_outputs[index] = (int64_t)lua_tointeger(state, -1);
-            } else {
-                char message[RELAY_SCRIPT_DIAGNOSTIC_CAPACITY];
-
-                (void)snprintf(message, sizeof(message),
-                    "Output '%s' returned the wrong type.",
-                    schema->outputs[index].key);
-                relay_script_diagnostic_set(diagnostic, message);
-                lua_pop(state, 1);
-                luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
-                lua_settop(state, stack_base);
-                return false;
-            }
-            lua_pop(state, 1);
-        }
+            "on_process must not return a value; write through outputs.");
+        goto cleanup;
     }
     if (!relay_script_state_reference_is_valid(state, state_reference)) {
         relay_script_diagnostic_set(diagnostic,
             "Persistent state must contain only bounded scalar values.");
-        luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
-        lua_settop(state, stack_base);
-        return false;
+        goto cleanup;
     }
-    luaL_unref(state, LUA_REGISTRYINDEX, instance->runtime_reference);
+    for (index = 0; index < transaction.reservation_count; index++) {
+        if (!transaction.reservations[index].moved) {
+            relay_script_diagnostic_set(diagnostic,
+                "Every popped item must be pushed exactly once.");
+            goto cleanup;
+        }
+    }
+    if (instance->initialized) {
+        luaL_unref(state, LUA_REGISTRYINDEX, instance->runtime_reference);
+    }
     instance->runtime_reference = state_reference;
-    for (index = 0; index < schema->output_count; index++) {
-        output_values[index] = candidate_outputs[index];
+    instance->initialized = true;
+    (void)memcpy(invocation.input_queues, transaction.input_queues,
+        sizeof(transaction.input_queues));
+    (void)memcpy(invocation.output_queues, transaction.output_queues,
+        sizeof(transaction.output_queues));
+    (void)memcpy(invocation.output_values, transaction.output_values,
+        sizeof(transaction.output_values));
+    state_reference = LUA_NOREF;
+    success = true;
+
+cleanup:
+    if (state_reference != LUA_NOREF) {
+        luaL_unref(state, LUA_REGISTRYINDEX, state_reference);
     }
     lua_settop(state, stack_base);
-    relay_script_diagnostic_set(diagnostic, "Invocation completed.");
-    return true;
+    if (success) {
+        relay_script_diagnostic_set(diagnostic, "Invocation completed.");
+    }
+    return success;
 }
 
 void relay_script_artifact_shutdown(Relay_ScriptRuntime *runtime,
@@ -880,6 +1271,151 @@ void relay_script_instance_shutdown(Relay_ScriptRuntime *runtime,
             instance->runtime_reference);
     }
     *instance = (Relay_ScriptInstanceState){0};
+}
+
+/** Sort serialized persistent state independently of Lua hash iteration. */
+static int relay_script_state_entry_compare(const void *left,
+    const void *right)
+{
+    const Relay_ScriptStateEntry *left_entry = left;
+    const Relay_ScriptStateEntry *right_entry = right;
+
+    return strcmp(left_entry->key, right_entry->key);
+}
+
+/** Return one bounded C string length, or capacity when unterminated. */
+static size_t relay_script_bounded_string_length(const char *value,
+    size_t capacity)
+{
+    const char *end = memchr(value, '\0', capacity);
+
+    return end == NULL ? capacity : (size_t)(end - value);
+}
+
+bool relay_script_instance_export(Relay_ScriptRuntime *runtime,
+    const Relay_ScriptInstanceState *instance,
+    Relay_ScriptStateSnapshot *snapshot)
+{
+    lua_State *state;
+
+    if (runtime == NULL || runtime->state == NULL || instance == NULL ||
+        snapshot == NULL) {
+        return false;
+    }
+    *snapshot = (Relay_ScriptStateSnapshot){0};
+    if (!instance->initialized) {
+        return true;
+    }
+    state = runtime->state;
+    lua_rawgeti(state, LUA_REGISTRYINDEX, instance->runtime_reference);
+    if (!lua_istable(state, -1)) {
+        lua_pop(state, 1);
+        return false;
+    }
+    lua_pushnil(state);
+    while (lua_next(state, -2) != 0) {
+        Relay_ScriptStateEntry *entry;
+        size_t key_length;
+        const char *key;
+
+        if (snapshot->count >= RELAY_SCRIPT_STATE_ENTRY_LIMIT ||
+            lua_type(state, -2) != LUA_TSTRING ||
+            (key = lua_tolstring(state, -2, &key_length)) == NULL ||
+            !relay_script_port_key_is_valid(key, key_length) ||
+            !relay_script_state_value_is_valid(state, -1)) {
+            lua_pop(state, 2);
+            return false;
+        }
+        entry = &snapshot->entries[snapshot->count++];
+        (void)memcpy(entry->key, key, key_length);
+        entry->key[key_length] = '\0';
+        if (lua_isboolean(state, -1)) {
+            entry->type = RELAY_SCRIPT_STATE_BOOLEAN;
+            entry->integer = lua_toboolean(state, -1) ? 1 : 0;
+        } else if (lua_isinteger(state, -1)) {
+            entry->type = RELAY_SCRIPT_STATE_INTEGER;
+            entry->integer = (int64_t)lua_tointeger(state, -1);
+        } else {
+            size_t string_length;
+            const char *string = lua_tolstring(state, -1, &string_length);
+
+            entry->type = RELAY_SCRIPT_STATE_STRING;
+            (void)memcpy(entry->string, string, string_length);
+            entry->string[string_length] = '\0';
+        }
+        lua_pop(state, 1);
+    }
+    lua_pop(state, 1);
+    qsort(snapshot->entries, snapshot->count, sizeof(snapshot->entries[0]),
+        relay_script_state_entry_compare);
+    snapshot->initialized = true;
+    return true;
+}
+
+bool relay_script_instance_import(Relay_ScriptRuntime *runtime,
+    Relay_ScriptInstanceState *instance,
+    const Relay_ScriptStateSnapshot *snapshot)
+{
+    lua_State *state;
+    int reference;
+    size_t index;
+
+    if (runtime == NULL || runtime->state == NULL || instance == NULL ||
+        snapshot == NULL || snapshot->count > RELAY_SCRIPT_STATE_ENTRY_LIMIT) {
+        return false;
+    }
+    if (!snapshot->initialized) {
+        if (snapshot->count != 0) {
+            return false;
+        }
+        relay_script_instance_shutdown(runtime, instance);
+        return true;
+    }
+    for (index = 0; index < snapshot->count; index++) {
+        const Relay_ScriptStateEntry *entry = &snapshot->entries[index];
+        const size_t key_length = relay_script_bounded_string_length(
+            entry->key, sizeof(entry->key));
+        size_t previous;
+
+        if (!relay_script_port_key_is_valid(entry->key, key_length) ||
+            (entry->type != RELAY_SCRIPT_STATE_BOOLEAN &&
+                entry->type != RELAY_SCRIPT_STATE_INTEGER &&
+                entry->type != RELAY_SCRIPT_STATE_STRING) ||
+            (entry->type == RELAY_SCRIPT_STATE_STRING &&
+                relay_script_bounded_string_length(entry->string,
+                    sizeof(entry->string)) >
+                    RELAY_SCRIPT_STATE_STRING_LIMIT) ||
+            (entry->type == RELAY_SCRIPT_STATE_BOOLEAN &&
+                entry->integer != 0 && entry->integer != 1)) {
+            return false;
+        }
+        for (previous = 0; previous < index; previous++) {
+            if (strcmp(snapshot->entries[previous].key, entry->key) == 0) {
+                return false;
+            }
+        }
+    }
+    state = runtime->state;
+    lua_createtable(state, 0, (int)snapshot->count);
+    for (index = 0; index < snapshot->count; index++) {
+        const Relay_ScriptStateEntry *entry = &snapshot->entries[index];
+
+        if (entry->type == RELAY_SCRIPT_STATE_BOOLEAN) {
+            lua_pushboolean(state, entry->integer != 0);
+        } else if (entry->type == RELAY_SCRIPT_STATE_INTEGER) {
+            lua_pushinteger(state, (lua_Integer)entry->integer);
+        } else {
+            lua_pushstring(state, entry->string);
+        }
+        lua_setfield(state, -2, entry->key);
+    }
+    reference = luaL_ref(state, LUA_REGISTRYINDEX);
+    if (instance->initialized) {
+        luaL_unref(state, LUA_REGISTRYINDEX, instance->runtime_reference);
+    }
+    instance->runtime_reference = reference;
+    instance->initialized = true;
+    return true;
 }
 
 void relay_script_runtime_shutdown(Relay_ScriptRuntime *runtime)

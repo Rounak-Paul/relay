@@ -24,7 +24,7 @@ int relay_script_language_test(void)
     static const char source[] =
         "-- module\n"
         "local miner = instance(source.iron_miner, { x = 0, y = 0 })\n"
-        "function on_process(inputs, state)\n"
+        "function on_process(state, inputs, outputs)\n"
         "  local ore = Type.IRON_ORE\n"
         "  return \"ready\"\n"
         "end\n";

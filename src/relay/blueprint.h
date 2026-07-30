@@ -87,6 +87,8 @@ typedef struct Relay_Blueprint {
     char key[RELAY_BLUEPRINT_KEY_CAPACITY];
     char source[RELAY_BLUEPRINT_SOURCE_CAPACITY];
     size_t source_size;
+    char deployed_source[RELAY_BLUEPRINT_SOURCE_CAPACITY];
+    size_t deployed_source_size;
     size_t cursor;
     size_t viewport_line;
     uint64_t revision;
@@ -160,6 +162,10 @@ bool relay_blueprint_rebuild_plan(Relay_BlueprintLibrary *library,
 bool relay_blueprint_instantiate(Relay_BlueprintLibrary *library,
     Relay_Blueprint *blueprint, Relay_NodeWorld *world, int64_t grid_x,
     int64_t grid_y, Relay_NodeId *module_node_id);
+
+/** Rebind all address-dependent definition views after owning storage moves. */
+bool relay_blueprint_library_rebind_storage(Relay_BlueprintLibrary *library,
+    Relay_NodeWorld *runtime_world);
 
 /** Release all blueprint artifacts, instance state, and visual scenes. */
 void relay_blueprint_library_shutdown(Relay_BlueprintLibrary *library);

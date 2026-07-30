@@ -49,9 +49,10 @@ to scripts: use node IDs and `relay_node_property_get` or
 `relay_node_property_set` so access rules remain enforceable.
 
 `Relay_NodeWorld` is one executable module graph. Preserve its typed directed
-connection rule: one output may fan out, each input has one replaceable source,
-and compatibility is determined by the declared port value type. Reusable and
-script-authored modules must compile to this same graph contract;
+connection rule: control outputs may fan out, physical-item outputs have one
+destination, each input has one replaceable source, and compatibility is
+determined by the declared port value type. Reusable and script-authored modules
+must compile to this same graph contract;
 do not create a parallel scripting-only wire format. Simulation runs in fixed
 steps and must not be advanced by rendering or terminal input.
 
@@ -63,14 +64,23 @@ Lua 5.5 is a private implementation dependency behind Relay-owned scripting
 APIs. Do not expose Lua types in public headers, open additional standard
 libraries, add arbitrary execution entry points, or let scripts access the
 filesystem, environment, process, host clock, network, terminal, logger, event
-bus, or mutable world storage. Gameplay scripts read immutable activation
-snapshots and enqueue capability-checked commands for deterministic commit.
-Transient resource/trigger inputs activate a process when nonzero; level inputs
-activate it when their value changes. Authoritative
-gameplay values are integers, Booleans, strings, and bounded project-owned
-containers; floating-point values and unordered table iteration are forbidden.
+bus, or mutable world storage. Gameplay scripts use sealed typed port namespaces
+and commit capability-checked changes transactionally. Trigger inputs activate a
+process when nonzero; material queues activate while nonempty; retained scalar
+inputs activate when their value changes. Authoritative gameplay values are
+integers, Booleans, strings, and bounded project-owned containers;
+floating-point values and unordered table iteration are forbidden.
 Source and project-owned typed persistent state are saved; Lua bytecode, stack
 frames, pointers, and VM tables are never authoritative.
+
+Coal, Iron Ore, Copper Ore, Stone, and future gameplay materials are unique
+physical items with stable IDs, not scalar quantities. Material ports own
+bounded engine FIFO queues. Player Lua may move an item only with
+`inputs.name:pop()` and `outputs.name:push(item)`. Never expose item
+constructors or C pointers, and never allow an item handle in persistent state.
+Any unresolved reservation, duplicate alias use, wrong type, stale handle, Lua
+fault, or invalid state must roll back queues, scalar outputs, and state
+together.
 
 Blueprints are versioned reusable module definitions with typed ports,
 parameters, components, connections, programs, and layout. Nested blueprints
@@ -82,6 +92,22 @@ The Blueprint's own program is an implicit `on_process` observer, never a
 component in its visual architecture. Keep the canonical top-level `instance` and
 `connect` declarations and visual graph transactionally synchronized in both
 directions.
+
+## Sessions
+
+Session persistence belongs to `Relay_SessionStore` and the application
+lifecycle. Save only authoritative project-owned data under the platform
+`.relay/` directory; never serialize pointers, Lua registry references,
+terminal state, jobs, or event subscribers. Load into a separate candidate,
+validate every bound and reference, recompile Blueprint source, rebind
+address-dependent views after ownership moves, and replace the active game only
+after complete success. Slots live under `sessions/<session-id>/` with a binary
+`session.rly` and separate draft/deployed Blueprint files under `scripts/`;
+`state.rly` contains only the last-played identity. Build saves in a complete
+sibling staging directory, flush every file, and atomically install the
+directory so a failed overwrite preserves the prior valid slot. Discover slots
+from their directories instead of trusting root metadata. Do not add migration
+or compatibility paths for the obsolete root-level `session.rly`.
 
 ## Workspace rendering
 
