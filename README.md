@@ -41,9 +41,11 @@ Relay stores a bounded multi-slot repository under `%USERPROFILE%\.relay\` on
 Windows and `$HOME/.relay/` on macOS and Linux. Each session ID owns a
 `sessions/<id>/session.rly` snapshot and separate draft/deployed Blueprint
 files under `scripts/`. The checksummed `state.rly` records only the last-played
-slot. Startup offers Continue, Saved Slots, and New Session. Press `S` during
-graph play to overwrite the active slot or save into a new slot; confirmed exit
-uses the same choice and reports failures in the TUI.
+slot. Every launch opens a dedicated main menu with Continue, New Session,
+Saved Sessions, and Exit. It supports arrows or `j`/`k`, Enter, and mouse
+clicks. Press `S` during graph play to overwrite the active slot or save into a
+new slot; confirmed in-game exit uses the same choice and reports failures in
+the TUI.
 
 The application owns a main-thread observer bus and a cross-platform worker
 pool. Their thread-safety and ownership rules are documented for contributors
@@ -51,9 +53,9 @@ in [AGENTS.md](AGENTS.md).
 
 ## Controls
 
-The game starts with a Coal Miner and 100 neutral currency. The Shop sells Coal,
-Iron, Copper, and Stone miners plus the optional Timer. Use `j`/`k` or the arrow
-keys to choose an offer, then Enter to purchase and place it in the Relay
+New Session starts with a Coal Miner and 100 neutral currency. The Shop sells
+Coal, Iron, Copper, and Stone miners plus the optional Timer. Use `j`/`k` or the
+arrow keys to choose an offer, then Enter to purchase and place it in the Relay
 workspace. Every miner is an autonomous source that emits one correctly typed
 resource per second while enabled; it has no material or control input. A Timer
 emits a typed `Trigger` event at a configurable interval for scripts and future

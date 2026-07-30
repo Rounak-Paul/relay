@@ -68,6 +68,12 @@ static void relay_app_back(Relay_App *app)
         app->overlay = RELAY_TERMINAL_OVERLAY_SESSION_MENU;
         return;
     }
+    if (app->overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM &&
+        app->game.session_exit_from_menu) {
+        app->game.session_exit_from_menu = false;
+        app->overlay = RELAY_TERMINAL_OVERLAY_SESSION_MENU;
+        return;
+    }
     if (app->overlay == RELAY_TERMINAL_OVERLAY_SAVE_SELECT ||
         app->overlay == RELAY_TERMINAL_OVERLAY_SAVE_FAILED) {
         app->overlay = app->exit_after_save ?
@@ -80,6 +86,7 @@ static void relay_app_back(Relay_App *app)
     if (app->overlay != RELAY_TERMINAL_OVERLAY_NONE) {
         app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
     } else if (!relay_game_back(&app->game)) {
+        app->game.session_exit_from_menu = false;
         app->overlay = RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM;
     }
 }
@@ -95,38 +102,63 @@ static bool relay_app_save(Relay_App *app, Relay_SessionSaveMode mode)
 static void relay_app_handle_session_menu(Relay_App *app,
     const Relay_TerminalEvent *event)
 {
+    if (event->session_menu_index_plus_one > 0 &&
+        event->session_menu_index_plus_one <=
+            RELAY_GAME_SESSION_MENU_COUNT) {
+        app->game.session_menu_selection =
+            (Relay_GameSessionMenuItem)(
+                event->session_menu_index_plus_one - 1);
+    }
     if (event->key == RELAY_TERMINAL_KEY_UP ||
         event->character == 'k') {
         app->game.session_menu_selection =
-            app->game.session_menu_selection == 0 ? 2 :
-                app->game.session_menu_selection - 1;
+            app->game.session_menu_selection ==
+                RELAY_GAME_SESSION_MENU_CONTINUE ?
+                RELAY_GAME_SESSION_MENU_EXIT :
+                (Relay_GameSessionMenuItem)(
+                    app->game.session_menu_selection - 1);
         return;
     }
     if (event->key == RELAY_TERMINAL_KEY_DOWN ||
         event->character == 'j') {
         app->game.session_menu_selection =
-            (app->game.session_menu_selection + 1) % 3;
+            (Relay_GameSessionMenuItem)(
+                (app->game.session_menu_selection + 1) %
+                    RELAY_GAME_SESSION_MENU_COUNT);
         return;
     }
-    if (event->key != RELAY_TERMINAL_KEY_CONFIRM) {
+    if (event->key != RELAY_TERMINAL_KEY_CONFIRM &&
+        event->session_menu_index_plus_one == 0) {
         return;
     }
-    if (app->game.session_menu_selection == 0) {
+    if (app->game.session_menu_selection ==
+        RELAY_GAME_SESSION_MENU_CONTINUE) {
         if (relay_session_load_last(&app->sessions, &app->game, &app->scripts,
                 &app->logger)) {
+            app->game.session_exit_from_menu = false;
             app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
             app->simulation_accumulator = 0.0;
+        } else {
+            (void)snprintf(app->game.session_status,
+                sizeof(app->game.session_status), "%s",
+                "No valid session is available to continue");
         }
         return;
     }
-    if (app->game.session_menu_selection == 1) {
+    if (app->game.session_menu_selection == RELAY_GAME_SESSION_MENU_NEW) {
+        relay_session_begin_new(&app->sessions, &app->game);
+        app->game.session_exit_from_menu = false;
+        app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
+        app->simulation_accumulator = 0.0;
+        return;
+    }
+    if (app->game.session_menu_selection == RELAY_GAME_SESSION_MENU_SAVED) {
         app->sessions.selected_slot = 0;
         app->overlay = RELAY_TERMINAL_OVERLAY_SLOT_SELECT;
         return;
     }
-    relay_session_begin_new(&app->sessions, &app->game);
-    app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
-    app->simulation_accumulator = 0.0;
+    app->game.session_exit_from_menu = true;
+    app->overlay = RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM;
 }
 
 /** Apply one key event to the saved-slot browser. */
@@ -150,6 +182,7 @@ static void relay_app_handle_slot_select(Relay_App *app,
         relay_session_load_slot(&app->sessions,
             app->sessions.slots[app->sessions.selected_slot].id,
             &app->game, &app->scripts, &app->logger)) {
+        app->game.session_exit_from_menu = false;
         app->overlay = RELAY_TERMINAL_OVERLAY_NONE;
         app->simulation_accumulator = 0.0;
     }
@@ -326,6 +359,11 @@ static void relay_app_on_event(const Relay_Event *event, void *context)
         return;
     }
     if (event->type == RELAY_EVENT_QUIT_REQUESTED) {
+        if (app->overlay != RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM) {
+            app->game.session_exit_from_menu =
+                app->overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU ||
+                app->overlay == RELAY_TERMINAL_OVERLAY_SLOT_SELECT;
+        }
         app->overlay = RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM;
     } else if (event->type == RELAY_EVENT_TERMINAL_RESIZED) {
         relay_logger_log(&app->logger, RELAY_LOG_LEVEL_DEBUG,
@@ -389,12 +427,10 @@ bool relay_app_init(Relay_App *app)
     (void)snprintf(app->game.session_status,
         sizeof(app->game.session_status), "%s", app->sessions.status);
     app->game.session_menu_selection =
-        app->sessions.continue_available ? 0 : 1;
-    if (app->sessions.slot_count > 0) {
-        app->overlay = RELAY_TERMINAL_OVERLAY_SESSION_MENU;
-    } else {
-        relay_session_begin_new(&app->sessions, &app->game);
-    }
+        app->sessions.continue_available ?
+            RELAY_GAME_SESSION_MENU_CONTINUE :
+            RELAY_GAME_SESSION_MENU_NEW;
+    app->overlay = RELAY_TERMINAL_OVERLAY_SESSION_MENU;
     if (!relay_event_bus_init(&app->events) ||
         relay_event_bus_subscribe(&app->events, RELAY_EVENT_QUIT_REQUESTED,
             relay_app_on_event, app) == 0 ||
@@ -531,11 +567,16 @@ int relay_app_run(Relay_App *app)
                 relay_app_handle_editor_input(app, &event);
             } else if (app->overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM) {
                 if (event.key == RELAY_TERMINAL_KEY_CONFIRM) {
-                    app->exit_after_save = true;
-                    app->game.session_exit_after_save = true;
-                    app->game.session_save_new_selected =
-                        app->sessions.active_session_id == 0;
-                    app->overlay = RELAY_TERMINAL_OVERLAY_SAVE_SELECT;
+                    if (app->game.session_exit_from_menu) {
+                        app->should_exit = true;
+                        continue;
+                    } else {
+                        app->exit_after_save = true;
+                        app->game.session_exit_after_save = true;
+                        app->game.session_save_new_selected =
+                            app->sessions.active_session_id == 0;
+                        app->overlay = RELAY_TERMINAL_OVERLAY_SAVE_SELECT;
+                    }
                 } else if (event.key == RELAY_TERMINAL_KEY_ESCAPE) {
                     relay_app_back(app);
                 }
@@ -595,6 +636,17 @@ int relay_app_run(Relay_App *app)
                     &app->sessions, app->overlay)) {
                 relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
                     "Terminal redraw failed.");
+                app->state = RELAY_APP_STATE_FAILED;
+                return 1;
+            }
+        } else if (event.type == RELAY_TERMINAL_EVENT_MOUSE &&
+            app->overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU &&
+            event.session_menu_index_plus_one != 0) {
+            relay_app_handle_session_menu(app, &event);
+            if (!relay_terminal_draw(&app->terminal, &app->game,
+                    &app->sessions, app->overlay)) {
+                relay_logger_log(&app->logger, RELAY_LOG_LEVEL_ERROR,
+                    "Startup menu redraw failed.");
                 app->state = RELAY_APP_STATE_FAILED;
                 return 1;
             }

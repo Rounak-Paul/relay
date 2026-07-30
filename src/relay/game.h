@@ -26,6 +26,15 @@ typedef enum Relay_GameWorkspaceMode {
     RELAY_GAME_WORKSPACE_MAP
 } Relay_GameWorkspaceMode;
 
+/** Actions exposed by the persistent startup main menu. */
+typedef enum Relay_GameSessionMenuItem {
+    RELAY_GAME_SESSION_MENU_CONTINUE,
+    RELAY_GAME_SESSION_MENU_NEW,
+    RELAY_GAME_SESSION_MENU_SAVED,
+    RELAY_GAME_SESSION_MENU_EXIT,
+    RELAY_GAME_SESSION_MENU_COUNT
+} Relay_GameSessionMenuItem;
+
 /** Inputs the game consumes from its terminal adapter. */
 typedef enum Relay_GameInput {
     RELAY_GAME_INPUT_NONE,
@@ -86,9 +95,10 @@ typedef struct Relay_Game {
     uint64_t save_revision;
     char session_status[96];
     bool session_continue_available;
-    size_t session_menu_selection;
+    Relay_GameSessionMenuItem session_menu_selection;
     bool session_save_new_selected;
     bool session_exit_after_save;
+    bool session_exit_from_menu;
 } Relay_Game;
 
 /** Initialize the node world and starting currency. */

@@ -214,11 +214,19 @@ directory as a recoverable backup until the new slot and state commit.
 Initialization resolves interrupted `.tmp` and `.bak` directories and deletes
 the obsolete root-level single-session files without migration.
 
-`Relay_App` pauses simulation under the Continue, Saved Slots, New Session,
-save-choice, exit, and save-failure overlays. Continue opens the last-played
-valid slot. The Saved Slots browser loads by stable session ID. `S` chooses
-between overwriting the active slot and saving a new independent slot;
-confirmed exit uses the same choice before shutdown.
+`Relay_App` always starts on a dedicated full-screen main menu rather than
+rendering an initialized graph behind a modal. Its stable action order is
+Continue, New Session, Saved Sessions, and Exit; arrows or `j`/`k`, Enter, and
+mouse clicks share the same route. Continue opens the last-played valid slot
+and remains visibly unavailable when none exists. New Session is the only main
+menu action that creates an unsaved gameplay identity. The Saved Sessions
+browser loads by stable session ID. Main-menu Exit has its own explicit
+confirmation and never enters the save flow.
+
+During gameplay, `S` chooses between overwriting the active slot and saving a
+new independent slot. In-game exit remains a separate confirmation followed by
+the same save choice before shutdown. Simulation is paused under every menu,
+browser, save-choice, exit, and save-failure surface.
 
 ## Workspace renderer boundary
 

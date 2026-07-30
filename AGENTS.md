@@ -129,5 +129,8 @@ display-only ports or infer ports from a node's label.
 Escape is the universal Back action. A nested workspace mode must consume Back
 before the application offers exit. Exit requires the terminal confirmation
 overlay and explicit Enter confirmation; never bind `q` or Escape directly to
-process termination. Newly created world objects must become the active focus
-through their owning game state, then the renderer may center its viewport.
+process termination. Every launch begins on the dedicated main menu in this
+stable order: Continue, New Session, Saved Sessions, Exit. Main-menu Exit
+confirms without saving; in-game Exit confirms before entering the save flow.
+Newly created world objects must become the active focus through their owning
+game state, then the renderer may center its viewport.

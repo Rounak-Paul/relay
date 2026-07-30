@@ -191,9 +191,15 @@ are reconstructed transactionally.
 When saved slots exist, startup offers:
 
 - **Continue**, which validates and opens the last-played slot;
-- **Saved Slots**, which opens a bounded slot browser ordered by most recent
+- **New Session**, which creates the deterministic starting game;
+- **Saved Sessions**, which opens a bounded slot browser ordered by most recent
   save; and
-- **New Session**, which creates the deterministic starting game.
+- **Exit**, which opens an explicit confirmation without creating or saving a
+  gameplay session.
+
+The dedicated main menu appears on every launch, including when no saved slots
+exist. Continue remains visible but unavailable in that state. Keyboard and
+mouse activation share the same four-action routing.
 
 `S` opens a save dialog. A game already loaded from or saved into a slot may
 either overwrite that slot or fork into a new slot with a new session ID. An

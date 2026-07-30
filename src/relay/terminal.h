@@ -54,6 +54,7 @@ typedef struct Relay_TerminalEvent {
     uint32_t character;
     int mouse_x;
     int mouse_y;
+    size_t session_menu_index_plus_one;
     size_t panel_tab_index_plus_one;
     size_t workspace_tab_index_plus_one;
     uint64_t selected_node_id;

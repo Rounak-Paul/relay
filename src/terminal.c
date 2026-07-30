@@ -13,7 +13,10 @@ enum {
     RELAY_TERMINAL_MIN_GAME_WIDTH = 12,
     RELAY_TERMINAL_MIN_PANEL_WIDTH = 30,
     RELAY_TERMINAL_MAX_PANEL_WIDTH = 42,
-    RELAY_TERMINAL_MIN_HEIGHT = 10
+    RELAY_TERMINAL_MIN_HEIGHT = 10,
+    RELAY_TERMINAL_START_WIDTH = 46,
+    RELAY_TERMINAL_START_HEIGHT = 18,
+    RELAY_TERMINAL_START_MENU_ROW = 10
 };
 
 /** One graph-port hit result used to start or finish mouse wiring. */
@@ -49,6 +52,38 @@ typedef struct Relay_TerminalEditorView {
     size_t cursor_line;
     size_t cursor_column;
 } Relay_TerminalEditorView;
+
+/** Resolve the centered title-screen origin for drawing and hit testing. */
+static bool relay_terminal_start_layout(int width, int height, int *x, int *y)
+{
+    if (x == NULL || y == NULL || width < RELAY_TERMINAL_START_WIDTH ||
+        height < RELAY_TERMINAL_START_HEIGHT) {
+        return false;
+    }
+    *x = (width - RELAY_TERMINAL_START_WIDTH) / 2;
+    *y = (height - RELAY_TERMINAL_START_HEIGHT) / 2;
+    return true;
+}
+
+/** Return the one-based startup action under one terminal-space point. */
+static size_t relay_terminal_session_menu_at(int width, int height,
+    int mouse_x, int mouse_y)
+{
+    int x;
+    int y;
+    int row;
+
+    if (!relay_terminal_start_layout(width, height, &x, &y)) {
+        return 0;
+    }
+    row = mouse_y - (y + RELAY_TERMINAL_START_MENU_ROW);
+    if (mouse_x <= x ||
+        mouse_x >= x + RELAY_TERMINAL_START_WIDTH - 1 ||
+        row < 0 || row >= RELAY_GAME_SESSION_MENU_COUNT) {
+        return 0;
+    }
+    return (size_t)row + 1;
+}
 
 /** Format the Timer's supported user-facing intervals from its data contract. */
 static void relay_terminal_timer_intervals(char *buffer, size_t capacity)
@@ -1313,54 +1348,122 @@ static bool relay_terminal_draw_overlay_line(HANDLE output, int x, int y,
     return relay_terminal_write_at(output, x, y, line);
 }
 
-/** Draw the startup Continue, saved-slots, and new-session chooser. */
+/** Draw one fixed-width line inside the dedicated startup panel. */
+static bool relay_terminal_draw_start_line(HANDLE output, int x, int y,
+    const char *text)
+{
+    char line[64];
+
+    (void)snprintf(line, sizeof(line), "│ %-42.42s │", text);
+    return relay_terminal_write_at(output, x, y, line);
+}
+
+/** Draw Relay's centered title treatment on an otherwise empty screen. */
+static bool relay_terminal_draw_start_title(HANDLE output, int width,
+    int height, int *origin_x, int *origin_y)
+{
+    int x;
+    int y;
+
+    if (!relay_terminal_start_layout(width, height, &x, &y)) {
+        *origin_x = -1;
+        *origin_y = -1;
+        return relay_terminal_write_at(output, 0, 0,
+            "Relay needs a terminal at least 46 x 18.");
+    }
+    *origin_x = x;
+    *origin_y = y;
+    return relay_terminal_write_at(output, x + 5, y,
+            " ____  _____ _        _ __   __") &&
+        relay_terminal_write_at(output, x + 5, y + 1,
+            "|  _ \\| ____| |      / \\ \\ / /") &&
+        relay_terminal_write_at(output, x + 5, y + 2,
+            "| |_) |  _| | |     / _ \\ V /") &&
+        relay_terminal_write_at(output, x + 5, y + 3,
+            "|  _ <| |___| |___ / ___ \\| |") &&
+        relay_terminal_write_at(output, x + 5, y + 4,
+            "|_| \\_\\_____|_____/_/   \\_\\_|") &&
+        relay_terminal_write_at(output, x + 10, y + 5,
+            "TERMINAL AUTOMATION NETWORK");
+}
+
+/** Draw the persistent four-action startup main menu. */
 static bool relay_terminal_draw_session_overlay(HANDLE output, int width,
     int height, const Relay_Game *game)
 {
-    const int x = (width - 38) / 2;
-    const int y = (height - 9) / 2;
-    char option[40];
+    int x;
+    int y;
+    char continue_option[48];
+    char new_option[48];
+    char saved_option[48];
+    char exit_option[48];
 
-    if (x < 0 || y < 0 || y + 8 >= height) {
+    if (!relay_terminal_draw_start_title(output, width, height, &x, &y)) {
         return false;
     }
-    (void)snprintf(option, sizeof(option), "%c %s",
-        game->session_menu_selection == 0 ? '>' : ' ',
+    if (x < 0) {
+        return true;
+    }
+    (void)snprintf(continue_option, sizeof(continue_option), "%c %s",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_CONTINUE ?
+            '>' : ' ',
         game->session_continue_available ?
-            "Continue last played" : "Continue (unavailable)");
-    return relay_terminal_write_at(output, x, y,
-            "╭────────────────────────────────────╮") &&
-        relay_terminal_draw_overlay_line(output, x, y + 1, "Relay Sessions") &&
-        relay_terminal_draw_overlay_line(output, x, y + 2, "") &&
-        relay_terminal_draw_overlay_line(output, x, y + 3, option) &&
-        relay_terminal_draw_overlay_line(output, x, y + 4,
-            game->session_menu_selection == 1 ?
-                "> Saved Slots" : "  Saved Slots") &&
-        relay_terminal_draw_overlay_line(output, x, y + 5,
-            game->session_menu_selection == 2 ?
-                "> New Session" : "  New Session") &&
-        relay_terminal_draw_overlay_line(output, x, y + 6,
-            "j/k select  Enter confirm") &&
-        relay_terminal_draw_overlay_line(output, x, y + 7,
+            "Continue" : "Continue (unavailable)");
+    (void)snprintf(new_option, sizeof(new_option), "%c New Session",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_NEW ?
+            '>' : ' ');
+    (void)snprintf(saved_option, sizeof(saved_option), "%c Saved Sessions",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_SAVED ?
+            '>' : ' ');
+    (void)snprintf(exit_option, sizeof(exit_option), "%c Exit",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_EXIT ?
+            '>' : ' ');
+    return relay_terminal_write_at(output, x, y + 7,
+            "╭────────────────────────────────────────────╮") &&
+        relay_terminal_draw_start_line(output, x, y + 8, "MAIN MENU") &&
+        relay_terminal_write_at(output, x, y + 9,
+            "├────────────────────────────────────────────┤") &&
+        relay_terminal_draw_start_line(output, x, y + 10,
+            continue_option) &&
+        relay_terminal_draw_start_line(output, x, y + 11, new_option) &&
+        relay_terminal_draw_start_line(output, x, y + 12, saved_option) &&
+        relay_terminal_draw_start_line(output, x, y + 13, exit_option) &&
+        relay_terminal_draw_start_line(output, x, y + 14, "") &&
+        relay_terminal_draw_start_line(output, x, y + 15,
+            "j/k or arrows  Enter select  Mouse click") &&
+        relay_terminal_draw_start_line(output, x, y + 16,
             game->session_status) &&
-        relay_terminal_write_at(output, x, y + 8,
-            "╰────────────────────────────────────╯");
+        relay_terminal_write_at(output, x, y + 17,
+            "╰────────────────────────────────────────────╯");
 }
 
 /** Draw a bounded browser for every discovered valid or invalid slot. */
 static bool relay_terminal_draw_slot_overlay(HANDLE output, int width,
     int height, const Relay_SessionStore *sessions)
 {
-    const int x = (width - 38) / 2;
-    const int y = (height - 10) / 2;
+    int start_x;
+    int start_y;
+    int x;
+    int y;
     const size_t first = sessions->selected_slot > 3 ?
         sessions->selected_slot - 3 : 0;
     size_t row;
 
-    if (x < 0 || y < 0 || y + 9 >= height ||
+    if (!relay_terminal_draw_start_title(output, width, height,
+            &start_x, &start_y)) {
+        return false;
+    }
+    if (start_x < 0) {
+        return true;
+    }
+    x = (width - 38) / 2;
+    y = start_y + 7;
+    if (x < 0 || y + 9 >= height ||
         !relay_terminal_write_at(output, x, y,
             "╭────────────────────────────────────╮") ||
-        !relay_terminal_draw_overlay_line(output, x, y + 1, "Saved Slots")) {
+        !relay_terminal_draw_overlay_line(output, x, y + 1,
+            sessions->slot_count == 0 ?
+                "Saved Sessions - none yet" : "Saved Sessions")) {
         return false;
     }
     for (row = 0; row < 5; row++) {
@@ -1425,18 +1528,31 @@ static bool relay_terminal_draw_save_overlay(HANDLE output, int width,
 }
 
 /** Draw the centered save-and-exit confirmation dialog. */
-static bool relay_terminal_draw_exit_overlay(HANDLE output, int width, int height)
+static bool relay_terminal_draw_exit_overlay(HANDLE output, int width,
+    int height, const Relay_Game *game)
 {
     const int x = (width - 38) / 2;
     const int y = (height - 6) / 2;
+    int start_x;
+    int start_y;
 
+    if (game->session_exit_from_menu &&
+        !relay_terminal_draw_start_title(output, width, height,
+            &start_x, &start_y)) {
+        return false;
+    }
+    if (game->session_exit_from_menu && start_x < 0) {
+        return true;
+    }
     return x >= 0 && y >= 0 && y + 5 < height &&
         relay_terminal_write_at(output, x, y,
             "╭────────────────────────────────────╮") &&
         relay_terminal_draw_overlay_line(output, x, y + 1, "Exit Relay?") &&
         relay_terminal_draw_overlay_line(output, x, y + 2, "") &&
         relay_terminal_draw_overlay_line(output, x, y + 3,
-            "Enter: choose save and exit") &&
+            game->session_exit_from_menu ?
+                "Enter: confirm exit" :
+                "Enter: choose save and exit") &&
         relay_terminal_draw_overlay_line(output, x, y + 4, "Esc: cancel") &&
         relay_terminal_write_at(output, x, y + 5,
             "╰────────────────────────────────────╯");
@@ -1481,10 +1597,6 @@ bool relay_terminal_draw(const Relay_Terminal *terminal, const Relay_Game *game,
     }
     width = information.srWindow.Right - information.srWindow.Left + 1;
     height = information.srWindow.Bottom - information.srWindow.Top + 1;
-    if (!relay_terminal_draw_split(terminal->output, width, height, game,
-            terminal)) {
-        return false;
-    }
     if (overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU) {
         return relay_terminal_draw_session_overlay(terminal->output, width,
             height, game);
@@ -1493,12 +1605,22 @@ bool relay_terminal_draw(const Relay_Terminal *terminal, const Relay_Game *game,
         return relay_terminal_draw_slot_overlay(terminal->output, width,
             height, sessions);
     }
+    if (overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM &&
+        game->session_exit_from_menu) {
+        return relay_terminal_draw_exit_overlay(terminal->output, width,
+            height, game);
+    }
+    if (!relay_terminal_draw_split(terminal->output, width, height, game,
+            terminal)) {
+        return false;
+    }
     if (overlay == RELAY_TERMINAL_OVERLAY_SAVE_SELECT) {
         return relay_terminal_draw_save_overlay(terminal->output, width,
             height, game, sessions);
     }
     if (overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM) {
-        return relay_terminal_draw_exit_overlay(terminal->output, width, height);
+        return relay_terminal_draw_exit_overlay(terminal->output, width,
+            height, game);
     }
     if (overlay == RELAY_TERMINAL_OVERLAY_SAVE_FAILED) {
         return relay_terminal_draw_save_failed_overlay(terminal->output, width,
@@ -1681,6 +1803,16 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
         event->type = RELAY_TERMINAL_EVENT_MOUSE;
         event->mouse_x = mouse->dwMousePosition.X;
         event->mouse_y = mouse->dwMousePosition.Y;
+        if (overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU && left_down &&
+            GetConsoleScreenBufferInfo(terminal->output, &information)) {
+            event->session_menu_index_plus_one =
+                relay_terminal_session_menu_at(
+                    information.srWindow.Right -
+                        information.srWindow.Left + 1,
+                    information.srWindow.Bottom -
+                        information.srWindow.Top + 1,
+                    event->mouse_x, event->mouse_y);
+        }
         if (overlay != RELAY_TERMINAL_OVERLAY_NONE) {
             terminal->dragging_grid = false;
             terminal->dragging_node = false;
@@ -2622,62 +2754,123 @@ static void relay_terminal_draw_overlay_line(int x, int y, uintattr_t color,
     (void)tb_printf(x, y, color, TB_DEFAULT, "│ %-34.34s │", text);
 }
 
-/** Draw the startup Continue, saved-slots, and new-session chooser. */
+/** Draw one fixed-width line inside the dedicated startup panel. */
+static void relay_terminal_draw_start_line(int x, int y, uintattr_t color,
+    const char *text)
+{
+    (void)tb_printf(x, y, color, TB_DEFAULT, "│ %-42.42s │", text);
+}
+
+/** Draw Relay's centered title treatment on an otherwise empty screen. */
+static bool relay_terminal_draw_start_title(int width, int height,
+    int *origin_x, int *origin_y)
+{
+    int x;
+    int y;
+
+    if (!relay_terminal_start_layout(width, height, &x, &y)) {
+        (void)tb_print(0, 0, TB_RED | TB_BOLD, TB_DEFAULT,
+            "Relay needs a terminal at least 46 x 18.");
+        return false;
+    }
+    *origin_x = x;
+    *origin_y = y;
+    (void)tb_print(x + 5, y, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        " ____  _____ _        _ __   __");
+    (void)tb_print(x + 5, y + 1, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        "|  _ \\| ____| |      / \\ \\ / /");
+    (void)tb_print(x + 5, y + 2, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        "| |_) |  _| | |     / _ \\ V /");
+    (void)tb_print(x + 5, y + 3, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        "|  _ <| |___| |___ / ___ \\| |");
+    (void)tb_print(x + 5, y + 4, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        "|_| \\_\\_____|_____/_/   \\_\\_|");
+    (void)tb_print(x + 10, y + 5, TB_YELLOW | TB_BOLD, TB_DEFAULT,
+        "TERMINAL AUTOMATION NETWORK");
+    return true;
+}
+
+/** Draw the persistent four-action startup main menu. */
 static void relay_terminal_draw_session_overlay(int width, int height,
     const Relay_Game *game)
 {
-    const int x = (width - 38) / 2;
-    const int y = (height - 9) / 2;
-    char option[40];
+    int x;
+    int y;
+    char continue_option[48];
+    char new_option[48];
+    char saved_option[48];
+    char exit_option[48];
 
-    if (x < 0 || y < 0 || y + 8 >= height) {
+    if (!relay_terminal_draw_start_title(width, height, &x, &y)) {
         return;
     }
-    (void)snprintf(option, sizeof(option), "%c %s",
-        game->session_menu_selection == 0 ? '>' : ' ',
+    (void)snprintf(continue_option, sizeof(continue_option), "%c %s",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_CONTINUE ?
+            '>' : ' ',
         game->session_continue_available ?
-            "Continue last played" : "Continue (unavailable)");
-    (void)tb_print(x, y, TB_CYAN | TB_BOLD, TB_DEFAULT,
-        "╭────────────────────────────────────╮");
-    relay_terminal_draw_overlay_line(x, y + 1, TB_WHITE | TB_BOLD,
-        "Relay Sessions");
-    relay_terminal_draw_overlay_line(x, y + 2, TB_WHITE, "");
-    relay_terminal_draw_overlay_line(x, y + 3,
-        game->session_menu_selection == 0 ? TB_GREEN | TB_BOLD : TB_WHITE,
-        option);
-    relay_terminal_draw_overlay_line(x, y + 4,
-        game->session_menu_selection == 1 ? TB_GREEN | TB_BOLD : TB_WHITE,
-        game->session_menu_selection == 1 ?
-            "> Saved Slots" : "  Saved Slots");
-    relay_terminal_draw_overlay_line(x, y + 5,
-        game->session_menu_selection == 2 ? TB_GREEN | TB_BOLD : TB_WHITE,
-        game->session_menu_selection == 2 ?
-            "> New Session" : "  New Session");
-    relay_terminal_draw_overlay_line(x, y + 6, TB_YELLOW,
-        "j/k select  Enter confirm");
-    relay_terminal_draw_overlay_line(x, y + 7, TB_WHITE,
+            "Continue" : "Continue (unavailable)");
+    (void)snprintf(new_option, sizeof(new_option), "%c New Session",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_NEW ?
+            '>' : ' ');
+    (void)snprintf(saved_option, sizeof(saved_option), "%c Saved Sessions",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_SAVED ?
+            '>' : ' ');
+    (void)snprintf(exit_option, sizeof(exit_option), "%c Exit",
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_EXIT ?
+            '>' : ' ');
+    (void)tb_print(x, y + 7, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        "╭────────────────────────────────────────────╮");
+    relay_terminal_draw_start_line(x, y + 8, TB_WHITE | TB_BOLD, "MAIN MENU");
+    (void)tb_print(x, y + 9, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        "├────────────────────────────────────────────┤");
+    relay_terminal_draw_start_line(x, y + 10,
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_CONTINUE &&
+            game->session_continue_available ?
+            TB_GREEN | TB_BOLD :
+            game->session_continue_available ? TB_WHITE : TB_BLUE,
+        continue_option);
+    relay_terminal_draw_start_line(x, y + 11,
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_NEW ?
+            TB_GREEN | TB_BOLD : TB_WHITE, new_option);
+    relay_terminal_draw_start_line(x, y + 12,
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_SAVED ?
+            TB_GREEN | TB_BOLD : TB_WHITE, saved_option);
+    relay_terminal_draw_start_line(x, y + 13,
+        game->session_menu_selection == RELAY_GAME_SESSION_MENU_EXIT ?
+            TB_GREEN | TB_BOLD : TB_WHITE, exit_option);
+    relay_terminal_draw_start_line(x, y + 14, TB_WHITE, "");
+    relay_terminal_draw_start_line(x, y + 15, TB_YELLOW,
+        "j/k or arrows  Enter select  Mouse click");
+    relay_terminal_draw_start_line(x, y + 16, TB_WHITE,
         game->session_status);
-    (void)tb_print(x, y + 8, TB_CYAN | TB_BOLD, TB_DEFAULT,
-        "╰────────────────────────────────────╯");
+    (void)tb_print(x, y + 17, TB_CYAN | TB_BOLD, TB_DEFAULT,
+        "╰────────────────────────────────────────────╯");
 }
 
 /** Draw a bounded browser for every discovered valid or invalid slot. */
 static void relay_terminal_draw_slot_overlay(int width, int height,
     const Relay_SessionStore *sessions)
 {
-    const int x = (width - 38) / 2;
-    const int y = (height - 10) / 2;
+    int start_x;
+    int start_y;
+    int x;
+    int y;
     const size_t first = sessions->selected_slot > 3 ?
         sessions->selected_slot - 3 : 0;
     size_t row;
 
-    if (x < 0 || y < 0 || y + 9 >= height) {
+    if (!relay_terminal_draw_start_title(width, height, &start_x,
+            &start_y)) {
         return;
     }
+    x = (width - 38) / 2;
+    y = start_y + 7;
+    (void)start_x;
     (void)tb_print(x, y, TB_CYAN | TB_BOLD, TB_DEFAULT,
         "╭────────────────────────────────────╮");
     relay_terminal_draw_overlay_line(x, y + 1, TB_WHITE | TB_BOLD,
-        "Saved Slots");
+        sessions->slot_count == 0 ?
+            "Saved Sessions - none yet" : "Saved Sessions");
     for (row = 0; row < 5; row++) {
         const size_t index = first + row;
         char line[48] = "";
@@ -2746,11 +2939,19 @@ static void relay_terminal_draw_save_overlay(int width, int height,
 }
 
 /** Draw the centered save-and-exit confirmation dialog. */
-static void relay_terminal_draw_exit_overlay(int width, int height)
+static void relay_terminal_draw_exit_overlay(int width, int height,
+    const Relay_Game *game)
 {
     const int x = (width - 38) / 2;
     const int y = (height - 6) / 2;
+    int start_x;
+    int start_y;
 
+    if (game->session_exit_from_menu &&
+        !relay_terminal_draw_start_title(width, height, &start_x,
+            &start_y)) {
+        return;
+    }
     if (x < 0 || y < 0 || y + 5 >= height) {
         return;
     }
@@ -2760,7 +2961,8 @@ static void relay_terminal_draw_exit_overlay(int width, int height)
         "Exit Relay?");
     relay_terminal_draw_overlay_line(x, y + 2, TB_WHITE, "");
     relay_terminal_draw_overlay_line(x, y + 3, TB_WHITE,
-        "Enter: choose save and exit");
+        game->session_exit_from_menu ?
+            "Enter: confirm exit" : "Enter: choose save and exit");
     relay_terminal_draw_overlay_line(x, y + 4, TB_WHITE, "Esc: cancel");
     (void)tb_print(x, y + 5, TB_CYAN | TB_BOLD, TB_DEFAULT,
         "╰────────────────────────────────────╯");
@@ -2820,15 +3022,22 @@ bool relay_terminal_draw(const Relay_Terminal *terminal, const Relay_Game *game,
     if (tb_clear() != TB_OK) {
         return false;
     }
-    relay_terminal_draw_split(tb_width(), height, game, terminal);
     if (overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU) {
         relay_terminal_draw_session_overlay(tb_width(), height, game);
     } else if (overlay == RELAY_TERMINAL_OVERLAY_SLOT_SELECT) {
         relay_terminal_draw_slot_overlay(tb_width(), height, sessions);
-    } else if (overlay == RELAY_TERMINAL_OVERLAY_SAVE_SELECT) {
+    } else if (overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM &&
+        game->session_exit_from_menu) {
+        relay_terminal_draw_exit_overlay(tb_width(), height, game);
+    } else {
+        relay_terminal_draw_split(tb_width(), height, game, terminal);
+    }
+    if (overlay == RELAY_TERMINAL_OVERLAY_SAVE_SELECT) {
         relay_terminal_draw_save_overlay(tb_width(), height, game, sessions);
     } else if (overlay == RELAY_TERMINAL_OVERLAY_EXIT_CONFIRM) {
-        relay_terminal_draw_exit_overlay(tb_width(), height);
+        if (!game->session_exit_from_menu) {
+            relay_terminal_draw_exit_overlay(tb_width(), height, game);
+        }
     } else if (overlay == RELAY_TERMINAL_OVERLAY_SAVE_FAILED) {
         relay_terminal_draw_save_failed_overlay(tb_width(), height, game);
     }
@@ -2985,6 +3194,12 @@ bool relay_terminal_poll(Relay_Terminal *terminal, const Relay_Game *game,
         event->type = RELAY_TERMINAL_EVENT_MOUSE;
         event->mouse_x = termbox_event.x;
         event->mouse_y = termbox_event.y;
+        if (overlay == RELAY_TERMINAL_OVERLAY_SESSION_MENU &&
+            termbox_event.key == TB_KEY_MOUSE_LEFT) {
+            event->session_menu_index_plus_one =
+                relay_terminal_session_menu_at(tb_width(), tb_height(),
+                    event->mouse_x, event->mouse_y);
+        }
         if (overlay != RELAY_TERMINAL_OVERLAY_NONE) {
             terminal->dragging_grid = false;
             terminal->dragging_node = false;
