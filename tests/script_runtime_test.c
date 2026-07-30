@@ -53,8 +53,10 @@ int relay_script_runtime_test(void)
         "input('iron_value', Type.IRON_ORE)\n"
         "input('copper_value', Type.COPPER_ORE)\n"
         "input('stone_value', Type.STONE)\n"
+        "input('iron_finished', Type.IRON)\n"
         "input('boolean_value', Type.BOOLEAN)\n"
         "input('integer_value', Type.INTEGER)\n"
+        "output('copper_finished', Type.COPPER)\n"
         "function on_process(state, inputs, outputs)\n"
         "end\n";
     static const char mutating_type_source[] =
@@ -128,6 +130,7 @@ int relay_script_runtime_test(void)
         RELAY_NODE_PORT_TYPE_IRON_ORE,
         RELAY_NODE_PORT_TYPE_COPPER_ORE,
         RELAY_NODE_PORT_TYPE_STONE,
+        RELAY_NODE_PORT_TYPE_IRON,
         RELAY_NODE_PORT_TYPE_BOOLEAN,
         RELAY_NODE_PORT_TYPE_INTEGER
     };
@@ -208,7 +211,8 @@ int relay_script_runtime_test(void)
             &diagnostic) ||
         schema.input_count != sizeof(expected_types) /
             sizeof(expected_types[0]) ||
-        schema.output_count != 0) {
+        schema.output_count != 1 ||
+        schema.outputs[0].type != RELAY_NODE_PORT_TYPE_COPPER) {
         goto failure;
     }
     for (index = 0; index < sizeof(expected_types) /

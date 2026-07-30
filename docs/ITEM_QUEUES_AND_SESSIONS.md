@@ -9,10 +9,11 @@ simulation boundary.
 
 ## Physical items
 
-Coal, Iron Ore, Copper Ore, and Stone are physical gameplay items. Every item
-has a nonzero, monotonically allocated `Relay_ItemId` and one immutable
-`Relay_NodePortType`. IDs are unique within a game session and are persisted.
-Only built-in sources and future data-defined recipes may create items.
+Coal, Iron Ore, Copper Ore, Stone, finished Iron, and finished Copper are
+physical gameplay items. Every item has a nonzero, monotonically allocated
+`Relay_ItemId` and one immutable `Relay_NodePortType`. IDs are unique within a
+game session and are persisted. Only built-in sources and data-defined recipes
+may create items.
 
 Material input and output ports own bounded FIFO queues. Queue storage is
 engine-owned and scripts never receive a C pointer. Boolean and Integer ports
@@ -27,6 +28,12 @@ The following invariants are mandatory:
 4. A full destination applies backpressure; it never destroys an item.
 5. Disabling a node preserves its queues, script state, and progress.
 6. Invalid scripts cannot create, copy, retain, transform, or destroy items.
+
+The built-in Stone Furnace owns immutable recipes that consume one Coal plus one
+ore and create the corresponding finished metal. Input consumption and finished
+item creation commit as one transaction or roll back together. Built-in Storage
+owns one typed route for every material and transfers the original item ID from
+its input queue to its output queue; it never creates or clones an item.
 
 ## Simulation transport
 

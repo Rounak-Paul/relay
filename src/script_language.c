@@ -60,11 +60,12 @@ static const Relay_ScriptCallable relay_script_callables[] = {
 };
 
 static const char *const relay_script_type_members[] = {
-    "TRIGGER", "COAL", "IRON_ORE", "COPPER_ORE", "STONE", "BOOLEAN", "INTEGER"
+    "TRIGGER", "COAL", "IRON_ORE", "COPPER_ORE", "STONE", "IRON", "COPPER",
+    "BOOLEAN", "INTEGER"
 };
 
 static const char *const relay_script_namespaces[] = {
-    "source", "control", "script"
+    "source", "control", "processor", "logistics", "script"
 };
 
 static const char *const relay_script_source_members[] = {
@@ -75,9 +76,17 @@ static const char *const relay_script_control_members[] = {
     "timer"
 };
 
+static const char *const relay_script_processor_members[] = {
+    "stone_furnace"
+};
+
+static const char *const relay_script_logistics_members[] = {
+    "storage"
+};
+
 static const char *const relay_script_globals[] = {
-    "Type", "source", "control", "script", "inputs", "outputs", "state",
-    "string", "table", "utf8"
+    "Type", "source", "control", "processor", "logistics", "script",
+    "inputs", "outputs", "state", "string", "table", "utf8"
 };
 
 /** Return whether one byte can occur in a Lua identifier. */
@@ -332,6 +341,24 @@ size_t relay_script_language_complete(const char *source, size_t source_size,
                 sizeof(relay_script_control_members) /
                     sizeof(relay_script_control_members[0]),
                 prefix, prefix_size, "Built-in control node", completions,
+                completion_capacity, &count);
+            return count;
+        }
+        if (qualifier_size == 9 &&
+            memcmp(&source[qualifier_start], "processor", 9) == 0) {
+            relay_script_complete_words(relay_script_processor_members,
+                sizeof(relay_script_processor_members) /
+                    sizeof(relay_script_processor_members[0]),
+                prefix, prefix_size, "Built-in processor node", completions,
+                completion_capacity, &count);
+            return count;
+        }
+        if (qualifier_size == 9 &&
+            memcmp(&source[qualifier_start], "logistics", 9) == 0) {
+            relay_script_complete_words(relay_script_logistics_members,
+                sizeof(relay_script_logistics_members) /
+                    sizeof(relay_script_logistics_members[0]),
+                prefix, prefix_size, "Built-in logistics node", completions,
                 completion_capacity, &count);
             return count;
         }

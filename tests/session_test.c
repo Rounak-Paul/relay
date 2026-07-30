@@ -400,13 +400,20 @@ int relay_session_test(void)
     Relay_Node *miner;
     Relay_Node *wrapper;
     Relay_Node *process;
+    Relay_Node *furnace;
+    Relay_Node *storage;
     Relay_Item saved_item;
     Relay_Item continued_item;
     Relay_Item replay_item;
+    Relay_Item furnace_coal;
+    Relay_Item furnace_ore;
+    Relay_Item storage_iron;
     Relay_ItemId saved_next_item_id;
     Relay_ItemId first_item_id;
     Relay_ItemId second_item_id;
     Relay_NodeId wrapper_id;
+    Relay_NodeId furnace_id;
+    Relay_NodeId storage_id;
     Relay_BlueprintId child_id;
     Relay_BlueprintId parent_id;
     uint64_t saved_session_id;
@@ -495,6 +502,25 @@ int relay_session_test(void)
         !relay_test_wrapper_item(wrapper, &saved_item)) {
         goto cleanup;
     }
+    furnace_id = relay_node_world_create(&game.nodes,
+        RELAY_NODE_DEFINITION_STONE_FURNACE, 180, 20);
+    storage_id = relay_node_world_create(&game.nodes,
+        RELAY_NODE_DEFINITION_STORAGE, 210, 20);
+    furnace = relay_node_world_find(&game.nodes, furnace_id);
+    storage = relay_node_world_find(&game.nodes, storage_id);
+    if (furnace == NULL || storage == NULL ||
+        !relay_node_world_item_create(&game.nodes, RELAY_NODE_PORT_TYPE_COAL,
+            &furnace_coal) ||
+        !relay_node_world_item_create(&game.nodes,
+            RELAY_NODE_PORT_TYPE_IRON_ORE, &furnace_ore) ||
+        !relay_node_world_item_create(&game.nodes, RELAY_NODE_PORT_TYPE_IRON,
+            &storage_iron) ||
+        !relay_item_queue_push(&furnace->input_queues[0], furnace_coal) ||
+        !relay_item_queue_push(&furnace->input_queues[1], furnace_ore) ||
+        !relay_item_queue_push(&storage->output_queues[4], storage_iron)) {
+        goto cleanup;
+    }
+    furnace->progress = 42;
     game.currency = 73;
     game.active_tab = RELAY_GAME_PANEL_TAB_INSPECTOR;
     child = relay_blueprint_library_find(&game.blueprints, child_id);
@@ -552,6 +578,8 @@ int relay_session_test(void)
     }
     wrapper = relay_node_world_find(&game.nodes, wrapper_id);
     process = relay_test_blueprint_process(&game, child_id);
+    furnace = relay_node_world_find(&game.nodes, furnace_id);
+    storage = relay_node_world_find(&game.nodes, storage_id);
     child = relay_blueprint_library_find(&game.blueprints, child_id);
     parent = relay_blueprint_library_find(&game.blueprints, parent_id);
     if (game.session_id != saved_session_id || game.save_revision != 1 ||
@@ -567,6 +595,15 @@ int relay_session_test(void)
         process == NULL || !relay_test_wrapper_item(wrapper, &continued_item) ||
         continued_item.id != saved_item.id ||
         continued_item.type != RELAY_NODE_PORT_TYPE_COAL ||
+        furnace == NULL || furnace->progress != 42 ||
+        !relay_item_queue_peek(&furnace->input_queues[0], &continued_item) ||
+        continued_item.id != furnace_coal.id ||
+        !relay_item_queue_peek(&furnace->input_queues[1], &continued_item) ||
+        continued_item.id != furnace_ore.id ||
+        storage == NULL ||
+        !relay_item_queue_peek(&storage->output_queues[4], &continued_item) ||
+        continued_item.id != storage_iron.id ||
+        continued_item.type != RELAY_NODE_PORT_TYPE_IRON ||
         !relay_node_world_items_valid(&game.nodes) ||
         !relay_test_step_game(&game, 70)) {
         goto cleanup;

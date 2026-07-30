@@ -8,13 +8,15 @@
 /** Stable identifier of a node definition. */
 typedef uint32_t Relay_NodeDefinitionId;
 
-/** Stable identifiers for Relay's built-in source definitions. */
+/** Stable identifiers for Relay's built-in node definitions. */
 typedef enum Relay_BuiltinNodeDefinitionId {
     RELAY_NODE_DEFINITION_TIMER = 1,
     RELAY_NODE_DEFINITION_COAL_MINER,
     RELAY_NODE_DEFINITION_IRON_MINER,
     RELAY_NODE_DEFINITION_COPPER_MINER,
-    RELAY_NODE_DEFINITION_STONE_MINER
+    RELAY_NODE_DEFINITION_STONE_MINER,
+    RELAY_NODE_DEFINITION_STONE_FURNACE,
+    RELAY_NODE_DEFINITION_STORAGE
 } Relay_BuiltinNodeDefinitionId;
 
 /** Stable identifier of a node instance. */
@@ -25,7 +27,9 @@ enum {
     RELAY_NODE_LOCAL_KEY_CAPACITY = 32,
     RELAY_ITEM_QUEUE_CAPACITY = 32,
     RELAY_TIMER_DEFAULT_INTERVAL_STEPS = 60,
-    RELAY_SOURCE_MINER_INTERVAL_STEPS = 60
+    RELAY_SOURCE_MINER_INTERVAL_STEPS = 60,
+    RELAY_STONE_FURNACE_INTERVAL_STEPS = 120,
+    RELAY_NODE_RECIPE_INPUT_CAPACITY = 4
 };
 
 /** Opaque persistent script state owned by one placed module instance. */
@@ -38,7 +42,8 @@ typedef struct Relay_ScriptInstanceState {
 typedef enum Relay_NodeCategory {
     RELAY_NODE_CATEGORY_SOURCE,
     RELAY_NODE_CATEGORY_PROCESSOR,
-    RELAY_NODE_CATEGORY_MODULE
+    RELAY_NODE_CATEGORY_MODULE,
+    RELAY_NODE_CATEGORY_LOGISTICS
 } Relay_NodeCategory;
 
 /** Runtime roles shared by design-time boundary nodes and flattened modules. */
@@ -74,7 +79,9 @@ typedef enum Relay_NodePortType {
     RELAY_NODE_PORT_TYPE_STONE,
     RELAY_NODE_PORT_TYPE_BOOLEAN,
     RELAY_NODE_PORT_TYPE_INTEGER,
-    RELAY_NODE_PORT_TYPE_TEXT
+    RELAY_NODE_PORT_TYPE_TEXT,
+    RELAY_NODE_PORT_TYPE_IRON,
+    RELAY_NODE_PORT_TYPE_COPPER
 } Relay_NodePortType;
 
 /** Stable identity of one unique physical gameplay item. */
@@ -112,8 +119,30 @@ typedef struct Relay_NodePropertyDefinition {
 typedef enum Relay_NodeBehavior {
     RELAY_NODE_BEHAVIOR_NONE,
     RELAY_NODE_BEHAVIOR_TIMER,
-    RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE
+    RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE,
+    RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR,
+    RELAY_NODE_BEHAVIOR_ITEM_STORAGE
 } Relay_NodeBehavior;
+
+/** One typed input quantity consumed by an immutable processing recipe. */
+typedef struct Relay_NodeRecipeInputDefinition {
+    size_t port_index;
+    uint32_t amount;
+} Relay_NodeRecipeInputDefinition;
+
+/** One deterministic physical-item transformation recipe. */
+typedef struct Relay_NodeRecipeDefinition {
+    Relay_NodeRecipeInputDefinition inputs[RELAY_NODE_RECIPE_INPUT_CAPACITY];
+    size_t input_count;
+    size_t output_port_index;
+    uint32_t output_amount;
+} Relay_NodeRecipeDefinition;
+
+/** One identity-preserving input-to-output route used by storage nodes. */
+typedef struct Relay_NodeItemRouteDefinition {
+    size_t input_port_index;
+    size_t output_port_index;
+} Relay_NodeItemRouteDefinition;
 
 /** Immutable parameters used to execute one data-driven node behavior. */
 typedef struct Relay_NodeSimulationDefinition {
@@ -121,6 +150,10 @@ typedef struct Relay_NodeSimulationDefinition {
     uint32_t interval_steps;
     size_t output_port_index;
     int64_t output_amount;
+    const Relay_NodeRecipeDefinition *recipes;
+    size_t recipe_count;
+    const Relay_NodeItemRouteDefinition *routes;
+    size_t route_count;
 } Relay_NodeSimulationDefinition;
 
 /** Immutable, data-driven definition shared by all matching nodes. */

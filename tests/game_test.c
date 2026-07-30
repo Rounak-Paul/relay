@@ -1,4 +1,5 @@
 #include "relay/game.h"
+#include "relay/icons.h"
 #include "relay/node_renderer.h"
 
 #include <string.h>
@@ -22,7 +23,7 @@ static bool relay_test_physical_item_queues(void)
         .category = RELAY_NODE_CATEGORY_SOURCE,
         .outputs = source_outputs,
         .output_count = 1,
-        .simulation = {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+        .simulation = {0}
     };
     Relay_NodeDefinition destination_definition = {
         .id = 9002,
@@ -33,7 +34,7 @@ static bool relay_test_physical_item_queues(void)
         .category = RELAY_NODE_CATEGORY_PROCESSOR,
         .inputs = destination_inputs,
         .input_count = 1,
-        .simulation = {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+        .simulation = {0}
     };
     Relay_NodeWorld world = {0};
     Relay_ItemQueue source_queue = {0};
@@ -201,8 +202,12 @@ int relay_game_test(void)
     Relay_NodeValueType value_type;
     Relay_NodeRenderCard card;
     const Relay_NodeDefinition *timer_definition;
+    const Relay_NodeDefinition *furnace_definition;
+    const Relay_NodeDefinition *storage_definition;
     Relay_NodeVisual trigger_port_visual;
     Relay_NodeVisual coal_port_visual;
+    Relay_NodeVisual iron_port_visual;
+    Relay_NodeVisual copper_port_visual;
     Relay_NodeId source_node_ids[4] = {0};
     Relay_NodeId timer_id;
     size_t index;
@@ -211,19 +216,58 @@ int relay_game_test(void)
         return 1;
     }
     timer_definition = relay_node_definition_find(RELAY_NODE_DEFINITION_TIMER);
+    furnace_definition = relay_node_definition_find(
+        RELAY_NODE_DEFINITION_STONE_FURNACE);
+    storage_definition = relay_node_definition_find(
+        RELAY_NODE_DEFINITION_STORAGE);
     trigger_port_visual = relay_node_renderer_port_visual(
         RELAY_NODE_PORT_TYPE_TRIGGER);
     coal_port_visual = relay_node_renderer_port_visual(RELAY_NODE_PORT_TYPE_COAL);
+    iron_port_visual = relay_node_renderer_port_visual(
+        RELAY_NODE_PORT_TYPE_IRON);
+    copper_port_visual = relay_node_renderer_port_visual(
+        RELAY_NODE_PORT_TYPE_COPPER);
     if (!relay_script_runtime_init(&scripts,
             RELAY_SCRIPT_RUNTIME_DEFAULT_MEMORY_LIMIT) ||
         !relay_game_init(&game, &scripts) || game.currency != 100 ||
-        game.nodes.count != 1 || relay_node_definition_count() != 5 ||
-        relay_game_shop_offer_count() != 5 || timer_definition == NULL ||
+        game.nodes.count != 1 || relay_node_definition_count() != 7 ||
+        relay_game_shop_offer_count() != 7 || timer_definition == NULL ||
+        strcmp(timer_definition->glyph, RELAY_ICON_TIMER) != 0 ||
         timer_definition->simulation.behavior != RELAY_NODE_BEHAVIOR_TIMER ||
         timer_definition->output_count != 1 ||
         timer_definition->outputs[0].type != RELAY_NODE_PORT_TYPE_TRIGGER ||
         strcmp(timer_definition->outputs[0].key, "trigger") != 0 ||
-        trigger_port_visual.color == coal_port_visual.color) {
+        furnace_definition == NULL ||
+        strcmp(furnace_definition->key, "processor.stone_furnace") != 0 ||
+        strcmp(furnace_definition->glyph, RELAY_ICON_FURNACE) != 0 ||
+        furnace_definition->input_count != 3 ||
+        furnace_definition->output_count != 2 ||
+        furnace_definition->simulation.behavior !=
+            RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR ||
+        furnace_definition->simulation.recipe_count != 2 ||
+        storage_definition == NULL ||
+        strcmp(storage_definition->key, "logistics.storage") != 0 ||
+        strcmp(storage_definition->glyph, RELAY_ICON_STORAGE) != 0 ||
+        storage_definition->category != RELAY_NODE_CATEGORY_LOGISTICS ||
+        storage_definition->input_count != 6 ||
+        storage_definition->output_count != 6 ||
+        storage_definition->simulation.behavior !=
+            RELAY_NODE_BEHAVIOR_ITEM_STORAGE ||
+        storage_definition->simulation.route_count != 6 ||
+        trigger_port_visual.color == coal_port_visual.color ||
+        iron_port_visual.color == copper_port_visual.color ||
+        !relay_node_port_type_is_item(RELAY_NODE_PORT_TYPE_IRON) ||
+        !relay_node_port_type_is_item(RELAY_NODE_PORT_TYPE_COPPER)) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&scripts);
+        return 1;
+    }
+    if (relay_game_shop_offer_at(5) == NULL ||
+        relay_game_shop_offer_at(5)->definition_id !=
+            RELAY_NODE_DEFINITION_STONE_FURNACE ||
+        relay_game_shop_offer_at(6) == NULL ||
+        relay_game_shop_offer_at(6)->definition_id !=
+            RELAY_NODE_DEFINITION_STORAGE) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
@@ -231,10 +275,14 @@ int relay_game_test(void)
     for (index = 0; index < sizeof(miner_ids) / sizeof(miner_ids[0]);
             index++) {
         const Relay_ShopOffer *offer = relay_game_shop_offer_at(index + 1);
+        const Relay_NodeDefinition *definition =
+            relay_node_definition_find(miner_ids[index]);
 
         if (!relay_test_source_definition(miner_ids[index],
                 miner_keys[index], miner_types[index]) ||
-            offer == NULL || offer->definition_id != miner_ids[index]) {
+            offer == NULL || offer->definition_id != miner_ids[index] ||
+            definition == NULL ||
+            strcmp(definition->glyph, RELAY_ICON_MINER) != 0) {
             relay_game_shutdown(&game);
             relay_script_runtime_shutdown(&scripts);
             return 1;
@@ -356,6 +404,81 @@ int relay_game_test(void)
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&scripts);
         return 1;
+    }
+    {
+        const Relay_NodeId furnace_id = relay_node_world_create(&game.nodes,
+            RELAY_NODE_DEFINITION_STONE_FURNACE, 150, 0);
+        const Relay_NodeId storage_id = relay_node_world_create(&game.nodes,
+            RELAY_NODE_DEFINITION_STORAGE, 180, 0);
+        Relay_Node *furnace = relay_node_world_find(&game.nodes, furnace_id);
+        Relay_Node *storage = relay_node_world_find(&game.nodes, storage_id);
+        Relay_Item coal_a;
+        Relay_Item coal_b;
+        Relay_Item iron_ore;
+        Relay_Item copper_ore;
+        Relay_Item iron;
+        Relay_Item copper;
+        Relay_ItemId iron_id;
+
+        if (furnace == NULL || storage == NULL ||
+            !relay_node_world_item_create(&game.nodes,
+                RELAY_NODE_PORT_TYPE_COAL, &coal_a) ||
+            !relay_node_world_item_create(&game.nodes,
+                RELAY_NODE_PORT_TYPE_COAL, &coal_b) ||
+            !relay_node_world_item_create(&game.nodes,
+                RELAY_NODE_PORT_TYPE_IRON_ORE, &iron_ore) ||
+            !relay_node_world_item_create(&game.nodes,
+                RELAY_NODE_PORT_TYPE_COPPER_ORE, &copper_ore) ||
+            !relay_item_queue_push(&furnace->input_queues[0], coal_a) ||
+            !relay_item_queue_push(&furnace->input_queues[0], coal_b) ||
+            !relay_item_queue_push(&furnace->input_queues[1], iron_ore) ||
+            !relay_item_queue_push(&furnace->input_queues[2], copper_ore)) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+        for (index = 0; index < RELAY_STONE_FURNACE_INTERVAL_STEPS; index++) {
+            if (!relay_game_step(&game)) {
+                relay_game_shutdown(&game);
+                relay_script_runtime_shutdown(&scripts);
+                return 1;
+            }
+        }
+        if (furnace->produced != 1 || furnace->progress != 0 ||
+            furnace->input_queues[0].count != 1 ||
+            !relay_item_queue_empty(&furnace->input_queues[1]) ||
+            furnace->input_queues[2].count != 1 ||
+            !relay_item_queue_peek(&furnace->output_queues[0], &iron) ||
+            iron.type != RELAY_NODE_PORT_TYPE_IRON ||
+            iron.id == coal_a.id || iron.id == iron_ore.id) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
+        iron_id = iron.id;
+        for (index = 0; index < RELAY_STONE_FURNACE_INTERVAL_STEPS; index++) {
+            if (!relay_game_step(&game)) {
+                relay_game_shutdown(&game);
+                relay_script_runtime_shutdown(&scripts);
+                return 1;
+            }
+        }
+        if (furnace->produced != 2 ||
+            !relay_item_queue_empty(&furnace->input_queues[0]) ||
+            !relay_item_queue_empty(&furnace->input_queues[2]) ||
+            !relay_item_queue_peek(&furnace->output_queues[1], &copper) ||
+            copper.type != RELAY_NODE_PORT_TYPE_COPPER ||
+            !relay_game_connect_nodes(&game, furnace_id, 0, storage_id, 4) ||
+            !relay_game_step(&game) ||
+            !relay_item_queue_empty(&furnace->output_queues[0]) ||
+            !relay_item_queue_peek(&storage->output_queues[4], &iron) ||
+            iron.type != RELAY_NODE_PORT_TYPE_IRON ||
+            iron.id != iron_id ||
+            !relay_node_world_items_valid(&game.nodes)) {
+            relay_game_shutdown(&game);
+            relay_script_runtime_shutdown(&scripts);
+            return 1;
+        }
     }
     {
         const size_t queue_count = miner->output_queues[0].count;

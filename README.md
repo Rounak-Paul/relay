@@ -54,18 +54,22 @@ in [AGENTS.md](AGENTS.md).
 ## Controls
 
 New Session starts with a Coal Miner and 100 neutral currency. The Shop sells
-Coal, Iron, Copper, and Stone miners plus the optional Timer. Use `j`/`k` or the
-arrow keys to choose an offer, then Enter to purchase and place it in the Relay
-workspace. Every miner is an autonomous source that emits one correctly typed
-resource per second while enabled; it has no material or control input. A Timer
-emits a typed `Trigger` event at a configurable interval for scripts and future
-control nodes. Press Tab or click a panel tab to switch between Shop, Inspector,
-and Scripts. Click a node title to focus it and open its Inspector. Miner
-Inspectors show output type, queue occupancy, fixed rate, progress, and lifetime
-production. Every material is a unique physical item with a stable persisted
-ID, and every material port owns a bounded FIFO rather than a scalar count. The
-Timer Inspector uses `[` and `]` to choose an interval of 1, 2, 4, 8, or 16
-seconds.
+Coal, Iron, Copper, and Stone miners, a Stone Furnace, Storage, and the optional
+Timer. Use `j`/`k` or the arrow keys to choose an offer, then Enter to purchase
+and place it in the Relay workspace. Every miner is an autonomous source that
+emits one correctly typed resource per second while enabled; it has no material
+or control input. The Stone Furnace consumes one Coal plus one Iron Ore or
+Copper Ore every two seconds and produces the corresponding finished Iron or
+Copper item. If both recipes remain available, it alternates them
+deterministically. Storage provides typed FIFO lanes for every built-in material
+and transfers the original item identity without copying it. A Timer emits a
+typed `Trigger` event at a configurable interval for scripts and future control
+nodes. Press Tab or click a panel tab to switch between Shop, Inspector, and
+Scripts. Click a node title to focus it and open its Inspector. Inspectors show
+definition-specific rates, progress, recipes, and queue state. Every material is
+a unique physical item with a stable persisted ID, and every material port owns
+a bounded FIFO rather than a scalar count. The Timer Inspector uses `[` and `]`
+to choose an interval of 1, 2, 4, 8, or 16 seconds.
 
 The main workspace begins with a `Relay` tab. It is an unbounded graph canvas:
 drag with the left mouse button to pan its grid, and purchased sources appear
@@ -134,9 +138,11 @@ outputs, and `state` together.
 ## Embedded font
 
 Departure Mono Nerd Font Mono is kept in `assets/fonts/` with its SIL Open Font
-License and compiled into the executable during the CMake build. A terminal
-still chooses its own rendering font, so select Departure Mono in the terminal
-profile to see its Nerd Font glyphs.
+License and compiled into the executable during the CMake build. Relay uses its
+single-cell Nerd Font glyphs for node kinds, Blueprint roles, Shop entries,
+Inspector titles, and neutral currency. A terminal still chooses its own
+rendering font, so select Departure Mono in the terminal profile to see those
+icons.
 
 ## Platform macros
 

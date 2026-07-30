@@ -1,6 +1,7 @@
 #include "relay/terminal.h"
 
 #include "relay/game.h"
+#include "relay/icons.h"
 #include "relay/node_renderer.h"
 #include "relay/script_language.h"
 #include "relay/session.h"
@@ -782,6 +783,8 @@ static const char *relay_terminal_port_glyph(Relay_NodePortType type)
     case 5: return "\x1b[1;35m●\x1b[0m";
     case 7: return "\x1b[1;34m●\x1b[0m";
     case 8: return "\x1b[1;32m●\x1b[0m";
+    case 9: return "\x1b[1;4;37m●\x1b[0m";
+    case 10: return "\x1b[1;4;31m●\x1b[0m";
     default: return "\x1b[1;31m?\x1b[0m";
     }
 }
@@ -975,8 +978,8 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
             divider_x, height)) {
         return true;
     }
-    (void)snprintf(line, sizeof(line), "│ ◆ %-20.20s │",
-        card.definition->display_name);
+    (void)snprintf(line, sizeof(line), "│ %s %-20.20s │",
+        card.visual.glyph, card.definition->display_name);
     if (!relay_terminal_draw_scene_text(output, x, y, divider_x, height,
             "╭────────────────────────╮") ||
         !relay_terminal_draw_scene_text(output, x, y + 1, divider_x, height,
@@ -1030,7 +1033,9 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
         }
     }
     if (card.definition->simulation.behavior ==
-            RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
+            RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE ||
+        card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR) {
         const int64_t interval = card.definition->simulation.interval_steps;
         const int filled = (int)(node->progress * 10 /
             interval);
@@ -1043,6 +1048,9 @@ static bool relay_terminal_draw_node_graph(HANDLE output, const Relay_Node *node
         (void)snprintf(content, sizeof(content), "interval: %lld s",
             (long long)(node->timer_interval_steps /
                 RELAY_GAME_SIMULATION_STEPS_PER_SECOND));
+    } else if (card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_ITEM_STORAGE) {
+        (void)snprintf(content, sizeof(content), "buffering items");
     } else if (node->runtime_kind ==
             RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
         (void)snprintf(content, sizeof(content), "public interface");
@@ -1081,7 +1089,8 @@ static bool relay_terminal_draw_node_map(HANDLE output, const Relay_Node *node,
         !relay_terminal_map_point_visible(point, divider_x, height)) {
         return true;
     }
-    (void)snprintf(line, sizeof(line), "◆ %s", card.definition->display_name);
+    (void)snprintf(line, sizeof(line), "%s %s", card.visual.glyph,
+        card.definition->display_name);
     return relay_terminal_draw_scene_text(output, (int)point.x, (int)point.y,
         divider_x, height, line);
 }
@@ -1310,7 +1319,8 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
         !relay_terminal_draw_wires(output, game, terminal, divider_x, height)) {
         return false;
     }
-    (void)snprintf(line, sizeof(line), "◈ %llu", (unsigned long long)game->currency);
+    (void)snprintf(line, sizeof(line), "%s %llu", RELAY_ICON_CURRENCY,
+        (unsigned long long)game->currency);
     if (!relay_terminal_write_at(output, divider_x + 2, 3, line)) {
         return false;
     }
@@ -1349,8 +1359,9 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
             const Relay_ShopOffer *offer = relay_game_shop_offer_at(index);
             const Relay_NodeDefinition *definition = relay_game_shop_offer_definition(offer);
 
-            (void)snprintf(line, sizeof(line), "%c %-16s %3llu", index == game->selected_offer ?
-                '>' : ' ', definition->display_name, (unsigned long long)offer->price);
+            (void)snprintf(line, sizeof(line), "%c %s %-14s %3llu",
+                index == game->selected_offer ? '>' : ' ', definition->glyph,
+                definition->display_name, (unsigned long long)offer->price);
             if (!relay_terminal_write_at(output, divider_x + 2, 6 + (int)index, line)) {
                 return false;
             }
@@ -1370,7 +1381,8 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
             if (definition == NULL) {
                 return false;
             }
-            (void)snprintf(line, sizeof(line), "%s", definition->display_name);
+            (void)snprintf(line, sizeof(line), "%s %s", definition->glyph,
+                definition->display_name);
             if (!relay_terminal_write_at(output, divider_x + 2, 6, line)) {
                 return false;
             }
@@ -1428,6 +1440,37 @@ static bool relay_terminal_draw_split(HANDLE output, int width, int height,
                     (long long)focused->produced);
                 if (!relay_terminal_write_at(output, divider_x + 2, 12,
                         line)) {
+                    return false;
+                }
+            } else if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR) {
+                if (!relay_terminal_write_at(output, divider_x + 2, 9,
+                        "recipes: Iron / Copper") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 10,
+                        "fuel: 1 Coal per item")) {
+                    return false;
+                }
+                (void)snprintf(line, sizeof(line), "progress: %lld / %u",
+                    (long long)focused->progress,
+                    definition->simulation.interval_steps);
+                if (!relay_terminal_write_at(output, divider_x + 2, 11,
+                        line)) {
+                    return false;
+                }
+                (void)snprintf(line, sizeof(line), "smelted: %lld",
+                    (long long)focused->produced);
+                if (!relay_terminal_write_at(output, divider_x + 2, 12,
+                        line)) {
+                    return false;
+                }
+            } else if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_ITEM_STORAGE) {
+                if (!relay_terminal_write_at(output, divider_x + 2, 9,
+                        "Typed FIFO storage") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 10,
+                        "32 in + 32 out per lane") ||
+                    !relay_terminal_write_at(output, divider_x + 2, 11,
+                        "Item identities are preserved.")) {
                     return false;
                 }
             } else if (focused->runtime_kind ==
@@ -2278,6 +2321,8 @@ static uintattr_t relay_terminal_port_color(Relay_NodePortType type)
     case 5: return TB_MAGENTA | TB_BOLD;
     case 7: return TB_BLUE | TB_BOLD;
     case 8: return TB_GREEN | TB_BOLD;
+    case 9: return TB_WHITE | TB_BOLD | TB_UNDERLINE;
+    case 10: return TB_RED | TB_BOLD | TB_UNDERLINE;
     default: return TB_RED | TB_BOLD;
     }
 }
@@ -2568,8 +2613,8 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
     relay_terminal_draw_scene_text(x, y, divider_x, height,
         relay_terminal_node_color(card.visual.color),
         "╭────────────────────────╮");
-    (void)snprintf(line, sizeof(line), "│ ◆ %-20.20s │",
-        card.definition->display_name);
+    (void)snprintf(line, sizeof(line), "│ %s %-20.20s │",
+        card.visual.glyph, card.definition->display_name);
     relay_terminal_draw_scene_text(x, y + 1, divider_x, height,
         relay_terminal_node_color(card.visual.color), line);
     relay_terminal_draw_scene_text(x, y + 2, divider_x, height,
@@ -2616,7 +2661,9 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
         }
     }
     if (card.definition->simulation.behavior ==
-            RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE) {
+            RELAY_NODE_BEHAVIOR_FIXED_RATE_SOURCE ||
+        card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR) {
         const int64_t interval = card.definition->simulation.interval_steps;
         const int filled = (int)(node->progress * 10 /
             interval);
@@ -2629,6 +2676,9 @@ static void relay_terminal_draw_node_graph(const Relay_Node *node,
         (void)snprintf(content, sizeof(content), "interval: %lld s",
             (long long)(node->timer_interval_steps /
                 RELAY_GAME_SIMULATION_STEPS_PER_SECOND));
+    } else if (card.definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_ITEM_STORAGE) {
+        (void)snprintf(content, sizeof(content), "buffering items");
     } else if (node->runtime_kind ==
             RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
         (void)snprintf(content, sizeof(content), "public interface");
@@ -2666,7 +2716,7 @@ static void relay_terminal_draw_node_map(const Relay_Node *node,
         !relay_terminal_map_point_visible(point, divider_x, height)) {
         return;
     }
-    (void)snprintf(line, sizeof(line), "◆ %s",
+    (void)snprintf(line, sizeof(line), "%s %s", card.visual.glyph,
         card.definition->display_name);
     relay_terminal_draw_scene_text((int)point.x, (int)point.y, divider_x,
         height, relay_terminal_node_color(card.visual.color), line);
@@ -2902,7 +2952,8 @@ static void relay_terminal_draw_split(int width, int height,
         }
     } else {
         (void)tb_printf(divider_x + 2, 3, TB_YELLOW | TB_BOLD, TB_DEFAULT,
-            "◈ %llu", (unsigned long long)game->currency);
+            "%s %llu", RELAY_ICON_CURRENCY,
+            (unsigned long long)game->currency);
         (void)tb_printf(divider_x + 2, 4, TB_WHITE, TB_DEFAULT, "wires: %zu",
             relay_game_active_world_const(game)->connection_count);
     }
@@ -2915,7 +2966,8 @@ static void relay_terminal_draw_split(int width, int height,
 
             (void)tb_printf(divider_x + 2, 6 + (int)index,
                 index == game->selected_offer ? TB_GREEN | TB_BOLD : TB_WHITE,
-                TB_DEFAULT, "%c %s %llu", index == game->selected_offer ? '>' : ' ',
+                TB_DEFAULT, "%c %s %s %llu",
+                index == game->selected_offer ? '>' : ' ', definition->glyph,
                 definition->display_name, (unsigned long long)offer->price);
         }
     } else if (editing == NULL &&
@@ -2935,7 +2987,7 @@ static void relay_terminal_draw_split(int width, int height,
                 return;
             }
             (void)tb_printf(divider_x + 2, 6, TB_WHITE | TB_BOLD, TB_DEFAULT,
-                "%s", definition->display_name);
+                "%s %s", definition->glyph, definition->display_name);
             (void)tb_printf(divider_x + 2, 7, TB_WHITE, TB_DEFAULT, "id: %llu",
                 (unsigned long long)focused->id);
             if (definition->simulation.behavior ==
@@ -2971,6 +3023,25 @@ static void relay_terminal_draw_split(int width, int height,
                     simulation->interval_steps);
                 (void)tb_printf(divider_x + 2, 12, TB_WHITE, TB_DEFAULT,
                     "produced: %lld", (long long)focused->produced);
+            } else if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR) {
+                relay_terminal_draw_text(divider_x + 2, 9, TB_WHITE,
+                    "recipes: Iron / Copper");
+                relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,
+                    "fuel: 1 Coal per item");
+                (void)tb_printf(divider_x + 2, 11, TB_WHITE, TB_DEFAULT,
+                    "progress: %lld / %u", (long long)focused->progress,
+                    definition->simulation.interval_steps);
+                (void)tb_printf(divider_x + 2, 12, TB_WHITE, TB_DEFAULT,
+                    "smelted: %lld", (long long)focused->produced);
+            } else if (definition->simulation.behavior ==
+                    RELAY_NODE_BEHAVIOR_ITEM_STORAGE) {
+                relay_terminal_draw_text(divider_x + 2, 9, TB_WHITE,
+                    "Typed FIFO storage");
+                relay_terminal_draw_text(divider_x + 2, 10, TB_WHITE,
+                    "32 in + 32 out per lane");
+                relay_terminal_draw_text(divider_x + 2, 11, TB_WHITE,
+                    "Item identities are preserved.");
             } else if (focused->runtime_kind ==
                     RELAY_NODE_RUNTIME_BLUEPRINT_INPUT_BOUNDARY) {
                 relay_terminal_draw_text(divider_x + 2, 9, TB_CYAN | TB_BOLD,

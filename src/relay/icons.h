@@ -1,0 +1,14 @@
+#ifndef RELAY_ICONS_H
+#define RELAY_ICONS_H
+
+#define RELAY_ICON_TIMER "󰔛"
+#define RELAY_ICON_MINER "󰢷"
+#define RELAY_ICON_FURNACE "󰈸"
+#define RELAY_ICON_STORAGE "󰾁"
+#define RELAY_ICON_BLUEPRINT "󰆦"
+#define RELAY_ICON_BLUEPRINT_INPUT "󰋺"
+#define RELAY_ICON_BLUEPRINT_PROCESS "󰅩"
+#define RELAY_ICON_BLUEPRINT_OUTPUT "󰈇"
+#define RELAY_ICON_CURRENCY ""
+
+#endif

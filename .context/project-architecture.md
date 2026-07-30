@@ -163,6 +163,19 @@ suppresses the wrapper outputs; re-enabling it resumes retained progress and
 script state. New source definitions therefore require no simulation or
 terminal branch.
 
+Built-in material processing is definition-driven. `processor.stone_furnace`
+owns two immutable recipes: Coal plus Iron Ore produces Iron, and Coal plus
+Copper Ore produces Copper, each after 120 simulation steps. Recipe commits
+snapshot affected queues, consume inputs, allocate finished item identities,
+and roll back as one transaction on failure. Available recipes are selected
+from stable definition order starting at `produced % recipe_count`, which
+alternates continuously supplied recipes without runtime-only cursor state.
+`logistics.storage` owns six immutable typed input/output routes for Coal, both
+ores, Stone, Iron, and Copper. Each route transfers the original physical item
+identity into its output buffer; it never creates or clones an item. Both nodes
+expose only `node.enabled` and use the same Relay and Blueprint graph contract
+through their stable symbols.
+
 The Shop sells optional Timer modules. A Timer emits a transient typed Trigger
 at a configurable 1, 2, 4, 8, or 16 second interval for script and control
 activation. Trigger values are one-step events; Boolean and Integer values are
@@ -264,8 +277,13 @@ from either side; terminal input normalizes that interaction to one output-to-
 input graph connection before the game validates it.
 `relay_node_renderer_port_visual` owns the terminal-agnostic type color token,
 which both terminal backends apply to the port glyphs. Trigger, Coal, Iron Ore,
-Copper Ore, and Stone have distinct colors, so the visual language mirrors the
-graph's exact type rule.
+Copper Ore, Stone, Iron, and Copper have distinct colors, so the visual language
+mirrors the graph's exact type rule. `src/relay/icons.h` owns the named
+single-cell Nerd Font glyph vocabulary. Immutable definitions carry their icon
+through `Relay_NodeVisual`; both terminal backends consume that visual for graph
+cards and map labels, and definition glyphs are reused in Shop and Inspector
+rows. Connector dots remain dedicated wire anchors rather than decorative node
+icons.
 
 `Relay_Game.workspace_mode` owns the graph/map workspace state and
 `focused_node_id` records the active node for inspection as well as the last node

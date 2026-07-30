@@ -26,7 +26,7 @@ static bool relay_test_compact_architecture_source(void)
     static const char expected_created[] =
         "-- Relay Blueprint\n"
         "-- Ports: input/output with Type.*.\n"
-        "-- Components: source.*, control.*, or script.*.\n"
+        "-- Components: source.*, control.*, processor.*, logistics.*, or script.*.\n"
         "-- on_process(state, inputs, outputs); state persists per instance.\n"
         "-- Read inputs and write outputs by port name. Save with :w.\n"
         "\n"
@@ -42,7 +42,7 @@ static bool relay_test_compact_architecture_source(void)
     static const char expected_moved[] =
         "-- Relay Blueprint\n"
         "-- Ports: input/output with Type.*.\n"
-        "-- Components: source.*, control.*, or script.*.\n"
+        "-- Components: source.*, control.*, processor.*, logistics.*, or script.*.\n"
         "-- on_process(state, inputs, outputs); state persists per instance.\n"
         "-- Read inputs and write outputs by port name. Save with :w.\n"
         "\n"

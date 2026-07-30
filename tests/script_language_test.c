@@ -74,8 +74,9 @@ int relay_script_language_test(void)
         sizeof(type_prefix) - 1, sizeof(type_prefix) - 1, &catalog,
         completions, sizeof(completions) / sizeof(completions[0]),
         &replacement_start);
-    if (completion_count != 1 || replacement_start != 5 ||
+    if (completion_count != 2 || replacement_start != 5 ||
         strcmp(completions[0].label, "IRON_ORE") != 0 ||
+        strcmp(completions[1].label, "IRON") != 0 ||
         !relay_script_language_signature(call, sizeof(call) - 1,
             sizeof(call) - 1, &signature) ||
         strcmp(signature.label, "input(name, type)") != 0 ||
@@ -121,6 +122,24 @@ int relay_script_language_test(void)
     if (completion_count != 2 || replacement_start != 7 ||
         strcmp(completions[0].label, "coal_miner") != 0 ||
         strcmp(completions[1].label, "copper_miner") != 0) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&runtime);
+        return 1;
+    }
+    completion_count = relay_script_language_complete(
+        "processor.st", 12, 12, &catalog, completions,
+        sizeof(completions) / sizeof(completions[0]), &replacement_start);
+    if (completion_count != 1 || replacement_start != 10 ||
+        strcmp(completions[0].label, "stone_furnace") != 0) {
+        relay_game_shutdown(&game);
+        relay_script_runtime_shutdown(&runtime);
+        return 1;
+    }
+    completion_count = relay_script_language_complete(
+        "logistics.st", 12, 12, &catalog, completions,
+        sizeof(completions) / sizeof(completions[0]), &replacement_start);
+    if (completion_count != 1 || replacement_start != 10 ||
+        strcmp(completions[0].label, "storage") != 0) {
         relay_game_shutdown(&game);
         relay_script_runtime_shutdown(&runtime);
         return 1;

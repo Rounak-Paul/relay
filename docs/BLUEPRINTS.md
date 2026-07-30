@@ -133,7 +133,7 @@ The public interface and architecture follow it and are declared before
 ```lua
 -- Relay Blueprint
 -- Ports: input/output with Type.*.
--- Components: source.*, control.*, or script.*.
+-- Components: source.*, control.*, processor.*, logistics.*, or script.*.
 -- on_process(state, inputs, outputs); state persists per instance.
 -- Read inputs and write outputs by port name. Save with :w.
 
@@ -158,6 +158,8 @@ Type.COAL
 Type.IRON_ORE
 Type.COPPER_ORE
 Type.STONE
+Type.IRON
+Type.COPPER
 Type.BOOLEAN
 Type.INTEGER
 ```

@@ -901,6 +901,21 @@ static bool relay_session_node_state_valid(const Relay_Node *node,
             node->timer_elapsed_steps != 0) {
             return false;
         }
+    } else if (definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR) {
+        if ((uint64_t)node->progress >
+                definition->simulation.interval_steps ||
+            node->timer_interval_steps != 0 ||
+            node->timer_elapsed_steps != 0) {
+            return false;
+        }
+    } else if (definition->simulation.behavior ==
+            RELAY_NODE_BEHAVIOR_ITEM_STORAGE) {
+        if (node->progress != 0 || node->produced != 0 ||
+            node->timer_interval_steps != 0 ||
+            node->timer_elapsed_steps != 0) {
+            return false;
+        }
     } else if (node->progress != 0 || node->produced != 0 ||
             node->timer_interval_steps != 0 ||
             node->timer_elapsed_steps != 0) {

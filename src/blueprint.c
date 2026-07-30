@@ -1,5 +1,7 @@
 #include "relay/blueprint.h"
 
+#include "relay/icons.h"
+
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -9,7 +11,7 @@
 static const char relay_blueprint_default_source[] =
     "-- Relay Blueprint\n"
     "-- Ports: input/output with Type.*.\n"
-    "-- Components: source.*, control.*, or script.*.\n"
+    "-- Components: source.*, control.*, processor.*, logistics.*, or script.*.\n"
     "-- on_process(state, inputs, outputs); state persists per instance.\n"
     "-- Read inputs and write outputs by port name. Save with :w.\n"
     "\n"
@@ -839,40 +841,42 @@ static void relay_blueprint_definition_refresh(Relay_Blueprint *blueprint)
     blueprint->definition = (Relay_NodeDefinition){
         (Relay_NodeDefinitionId)(RELAY_BLUEPRINT_DEFINITION_ID_BASE +
             blueprint->id),
-        blueprint->key, blueprint->name, "λ",
+        blueprint->key, blueprint->name, RELAY_ICON_BLUEPRINT,
         "Compiled hierarchical Blueprint module.", RELAY_NODE_CATEGORY_MODULE,
         blueprint->inputs, blueprint->schema.input_count, blueprint->outputs,
         blueprint->schema.output_count, universal_properties,
-        universal_property_count, {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+        universal_property_count, {0}
     };
     blueprint->input_boundary_definition = (Relay_NodeDefinition){
         (Relay_NodeDefinitionId)(RELAY_BLUEPRINT_INPUT_DEFINITION_ID_BASE +
             blueprint->id),
-        "blueprint.boundary.inputs", "Module Inputs", "⇥",
+        "blueprint.boundary.inputs", "Module Inputs",
+        RELAY_ICON_BLUEPRINT_INPUT,
         "Public inputs entering this Blueprint architecture.",
         RELAY_NODE_CATEGORY_MODULE, NULL, 0,
         blueprint->input_boundary_outputs, blueprint->schema.input_count,
         universal_properties, universal_property_count,
-        {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+        {0}
     };
     blueprint->process_definition = (Relay_NodeDefinition){
         (Relay_NodeDefinitionId)(RELAY_BLUEPRINT_PROCESS_DEFINITION_ID_BASE +
             blueprint->id),
-        "blueprint.process", "Module Process", "λ",
+        "blueprint.process", "Module Process", RELAY_ICON_BLUEPRINT_PROCESS,
         "The Blueprint's implicit player-authored Lua process.",
         RELAY_NODE_CATEGORY_MODULE, blueprint->process_inputs,
         blueprint->schema.input_count, blueprint->process_outputs,
         blueprint->schema.output_count, universal_properties,
-        universal_property_count, {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+        universal_property_count, {0}
     };
     blueprint->output_boundary_definition = (Relay_NodeDefinition){
         (Relay_NodeDefinitionId)(RELAY_BLUEPRINT_OUTPUT_DEFINITION_ID_BASE +
             blueprint->id),
-        "blueprint.boundary.outputs", "Module Outputs", "⇤",
+        "blueprint.boundary.outputs", "Module Outputs",
+        RELAY_ICON_BLUEPRINT_OUTPUT,
         "Public outputs leaving this Blueprint architecture.",
         RELAY_NODE_CATEGORY_MODULE, blueprint->output_boundary_inputs,
         blueprint->schema.output_count, NULL, 0, universal_properties,
-        universal_property_count, {RELAY_NODE_BEHAVIOR_NONE, 0, 0, 0}
+        universal_property_count, {0}
     };
 }
 

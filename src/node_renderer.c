@@ -34,6 +34,10 @@ Relay_NodeVisual relay_node_renderer_port_visual(Relay_NodePortType type)
         return (Relay_NodeVisual){"●", 6};
     case RELAY_NODE_PORT_TYPE_STONE:
         return (Relay_NodeVisual){"●", 4};
+    case RELAY_NODE_PORT_TYPE_IRON:
+        return (Relay_NodeVisual){"●", 9};
+    case RELAY_NODE_PORT_TYPE_COPPER:
+        return (Relay_NodeVisual){"●", 10};
     case RELAY_NODE_PORT_TYPE_BOOLEAN:
         return (Relay_NodeVisual){"●", 5};
     case RELAY_NODE_PORT_TYPE_INTEGER:

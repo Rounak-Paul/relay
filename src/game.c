@@ -11,6 +11,8 @@ enum {
     RELAY_GAME_IRON_MINER_PRICE = 30,
     RELAY_GAME_COPPER_MINER_PRICE = 30,
     RELAY_GAME_STONE_MINER_PRICE = 20,
+    RELAY_GAME_STONE_FURNACE_PRICE = 40,
+    RELAY_GAME_STORAGE_PRICE = 20,
     RELAY_GAME_NODE_SPACING_X = 30
 };
 
@@ -20,7 +22,9 @@ static const Relay_ShopOffer relay_shop_offers[] = {
     {RELAY_NODE_DEFINITION_COAL_MINER, RELAY_GAME_COAL_MINER_PRICE},
     {RELAY_NODE_DEFINITION_IRON_MINER, RELAY_GAME_IRON_MINER_PRICE},
     {RELAY_NODE_DEFINITION_COPPER_MINER, RELAY_GAME_COPPER_MINER_PRICE},
-    {RELAY_NODE_DEFINITION_STONE_MINER, RELAY_GAME_STONE_MINER_PRICE}
+    {RELAY_NODE_DEFINITION_STONE_MINER, RELAY_GAME_STONE_MINER_PRICE},
+    {RELAY_NODE_DEFINITION_STONE_FURNACE, RELAY_GAME_STONE_FURNACE_PRICE},
+    {RELAY_NODE_DEFINITION_STORAGE, RELAY_GAME_STORAGE_PRICE}
 };
 
 /** Store focus in the active workspace and its shared renderer-facing field. */
@@ -181,6 +185,164 @@ static bool relay_game_step_fixed_rate_source(Relay_NodeWorld *world,
         INT64_MAX - simulation->output_amount ? INT64_MAX :
         node->produced + simulation->output_amount;
     return true;
+}
+
+/** Return whether one processor recipe can complete without blocking. */
+static bool relay_game_recipe_ready(const Relay_Node *node,
+    const Relay_NodeRecipeDefinition *recipe)
+{
+    size_t index;
+
+    if (node == NULL || node->definition == NULL || recipe == NULL ||
+        recipe->input_count > RELAY_NODE_RECIPE_INPUT_CAPACITY ||
+        recipe->output_port_index >= node->definition->output_count ||
+        recipe->output_amount == 0 ||
+        recipe->output_amount > RELAY_ITEM_QUEUE_CAPACITY ||
+        node->output_queues[recipe->output_port_index].count >
+            RELAY_ITEM_QUEUE_CAPACITY - recipe->output_amount) {
+        return false;
+    }
+    for (index = 0; index < recipe->input_count; index++) {
+        if (recipe->inputs[index].port_index >=
+                node->definition->input_count ||
+            node->input_queues[recipe->inputs[index].port_index].count <
+                recipe->inputs[index].amount) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Select an available recipe fairly from immutable definition order. */
+static const Relay_NodeRecipeDefinition *relay_game_processor_recipe(
+    const Relay_Node *node)
+{
+    const Relay_NodeSimulationDefinition *simulation;
+    size_t start;
+    size_t offset;
+
+    if (node == NULL || node->definition == NULL) {
+        return NULL;
+    }
+    simulation = &node->definition->simulation;
+    if (simulation->recipe_count == 0 || simulation->recipes == NULL) {
+        return NULL;
+    }
+    start = (size_t)((uint64_t)node->produced % simulation->recipe_count);
+    for (offset = 0; offset < simulation->recipe_count; offset++) {
+        const size_t index = (start + offset) % simulation->recipe_count;
+
+        if (relay_game_recipe_ready(node, &simulation->recipes[index])) {
+            return &simulation->recipes[index];
+        }
+    }
+    return NULL;
+}
+
+/** Commit one physical-item recipe atomically while preserving uniqueness. */
+static bool relay_game_commit_recipe(Relay_NodeWorld *world, Relay_Node *node,
+    const Relay_NodeRecipeDefinition *recipe)
+{
+    Relay_ItemQueue input_snapshots[RELAY_NODE_RECIPE_INPUT_CAPACITY];
+    Relay_ItemQueue output_snapshot;
+    const Relay_ItemId next_item_id = world->next_item_id;
+    const Relay_NodePortType output_type =
+        node->definition->outputs[recipe->output_port_index].type;
+    size_t input_index;
+    size_t amount_index;
+
+    if (!relay_game_recipe_ready(node, recipe) ||
+        world->next_item_id > UINT64_MAX - recipe->output_amount) {
+        return false;
+    }
+    output_snapshot = node->output_queues[recipe->output_port_index];
+    for (input_index = 0; input_index < recipe->input_count; input_index++) {
+        input_snapshots[input_index] = node->input_queues[
+            recipe->inputs[input_index].port_index];
+    }
+    for (input_index = 0; input_index < recipe->input_count; input_index++) {
+        Relay_Item discarded;
+
+        for (amount_index = 0;
+            amount_index < recipe->inputs[input_index].amount;
+            amount_index++) {
+            if (!relay_item_queue_pop(&node->input_queues[
+                    recipe->inputs[input_index].port_index], &discarded)) {
+                goto rollback;
+            }
+        }
+    }
+    for (amount_index = 0; amount_index < recipe->output_amount;
+            amount_index++) {
+        Relay_Item output;
+
+        if (!relay_node_world_item_create(world, output_type, &output) ||
+            !relay_item_queue_push(
+                &node->output_queues[recipe->output_port_index], output)) {
+            goto rollback;
+        }
+    }
+    return true;
+
+rollback:
+    world->next_item_id = next_item_id;
+    node->output_queues[recipe->output_port_index] = output_snapshot;
+    for (input_index = 0; input_index < recipe->input_count; input_index++) {
+        node->input_queues[recipe->inputs[input_index].port_index] =
+            input_snapshots[input_index];
+    }
+    return false;
+}
+
+/** Advance one data-driven item processor through its selected recipe. */
+static bool relay_game_step_item_processor(Relay_NodeWorld *world,
+    Relay_Node *node)
+{
+    const Relay_NodeSimulationDefinition *simulation =
+        &node->definition->simulation;
+    const Relay_NodeRecipeDefinition *recipe =
+        relay_game_processor_recipe(node);
+
+    if (simulation->interval_steps == 0) {
+        return false;
+    }
+    if (recipe == NULL) {
+        node->progress = 0;
+        return true;
+    }
+    if ((uint64_t)node->progress < simulation->interval_steps) {
+        node->progress++;
+    }
+    if ((uint64_t)node->progress < simulation->interval_steps) {
+        return true;
+    }
+    if (!relay_game_commit_recipe(world, node, recipe)) {
+        return false;
+    }
+    node->progress = 0;
+    node->produced = node->produced >
+        INT64_MAX - recipe->output_amount ? INT64_MAX :
+        node->produced + recipe->output_amount;
+    return true;
+}
+
+/** Move one item per immutable storage route without changing identity. */
+static void relay_game_step_item_storage(Relay_Node *node)
+{
+    const Relay_NodeSimulationDefinition *simulation =
+        &node->definition->simulation;
+    size_t index;
+
+    for (index = 0; index < simulation->route_count; index++) {
+        const Relay_NodeItemRouteDefinition *route =
+            &simulation->routes[index];
+        const Relay_NodePortType type =
+            node->definition->inputs[route->input_port_index].type;
+
+        (void)relay_item_queue_transfer(
+            &node->input_queues[route->input_port_index],
+            &node->output_queues[route->output_port_index], type);
+    }
 }
 
 /** Return a connected source value for a destination input in this tick. */
@@ -1250,6 +1412,23 @@ static bool relay_game_step_world(Relay_Game *game, Relay_NodeWorld *world)
             node->runtime_kind ==
                 RELAY_NODE_RUNTIME_BLUEPRINT_PROCESS) {
             relay_game_step_script(game, world, node);
+        }
+    }
+    for (index = 0; index < world->count; index++) {
+        Relay_Node *node = &world->nodes[index];
+
+        if (!relay_game_node_enabled(world, node) ||
+            node->definition == NULL) {
+            continue;
+        }
+        if (node->definition->simulation.behavior ==
+                RELAY_NODE_BEHAVIOR_ITEM_PROCESSOR) {
+            if (!relay_game_step_item_processor(world, node)) {
+                return false;
+            }
+        } else if (node->definition->simulation.behavior ==
+                RELAY_NODE_BEHAVIOR_ITEM_STORAGE) {
+            relay_game_step_item_storage(node);
         }
     }
     for (index = 0; index < world->count; index++) {
